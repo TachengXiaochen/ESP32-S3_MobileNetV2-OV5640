@@ -1,0 +1,34 @@
+name: Push component to https://components.espressif.com
+on:
+  push:
+    branches:
+      - master
+jobs:
+  upload_components:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: "recursive"
+      - name: Upload component to the component registry
+        uses: espressif/upload-components-ci-action@v1
+        with:
+          directories: >
+            esp-dl;
+            models/cat_detect;
+            models/coco_detect;
+            models/coco_pose;
+            models/yolo26;
+            models/color_detect;
+            models/dog_detect;
+            models/hand_detect;
+            models/hand_gesture_recognition;
+            models/human_face_detect;
+            models/human_face_recognition;
+            models/imagenet_cls;
+            models/motion_detect;
+            models/pedestrian_detect;
+            models/speaker_verification;
+            tools/dl_fft;
+          namespace: "espressif"
+          api_token: ${{ secrets.IDF_COMPONENT_API_TOKEN }}
