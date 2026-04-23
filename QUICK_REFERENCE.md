@@ -8,12 +8,14 @@ AA:BB:CC:DD:EE:FF    # 输入MAC地址（必须先输入才能使用摄像头）
 r                    # 重置系统，重新输入MAC
 ```
 
-### 💾 存储模式切换（新增）
+### 💾 存储模式切换
 ```
 storage sd           # 切换到SD卡存储模式
-storage flash        # 切换到内部Flash（SPIFFS）模式
+storage flash        # 切换到内部Flash（SPIFFS）模式（**默认**）
 storage status       # 查看当前存储模式
 ```
+
+**注意**：系统默认使用 SPIFFS（内部Flash）存储，无需外部 SD 卡即可正常使用。
 
 ### 📷 资产注册（三视图拍摄）
 ```

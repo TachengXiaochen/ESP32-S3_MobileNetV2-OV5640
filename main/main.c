@@ -5,20 +5,24 @@
 #include "esp_log.h"
 #include "esp_camera.h"
 #include "esp_timer.h"
-#include "esp_http_server.h"
 #include "nvs_flash.h"
-#include "esp_netif.h"
-#include "esp_wifi.h"
-#include "esp_event.h"
 #include "driver/uart.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "esp_task_wdt.h"
 #include "sdkconfig.h"
-#include "camera_stream.h"
+
 #include "mobilenet_wrapper.h"
 #include "asset_manager.h"
+
+// 看门狗函数声明（如果头文件中未定义）
+esp_err_t esp_task_wdt_add(TaskHandle_t handle);
+esp_err_t esp_task_wdt_reset(void);
+
+// 看门狗安全包装宏
+#define SAFE_WDT_ADD()      esp_task_wdt_add(NULL)
+#define SAFE_WDT_RESET()    esp_task_wdt_reset()
 
 // 定义MAX和MIN宏
 #ifndef MAX
@@ -29,10 +33,6 @@
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 #endif
 
-#define WIFI_SSID "ESP32_CAM"
-#define WIFI_PASS "12345678"
-#define MAX_STA_CONN 4
-
 // UART 配置
 #define UART_NUM UART_NUM_0
 #define UART_BAUD_RATE 115200
@@ -41,8 +41,8 @@
 // 特征向量相似度阈值 (调整为更合适的数值)
 #define COSINE_THRESHOLD 0.85f
 
-// MAC地址最大长度
-#define MAC_ADDR_LEN 18
+// MAC地址最大长度已在asset_manager.h中定义，此处不再重复定义
+// 使用 asset_manager.h 中的 MAC_ADDR_LEN (17字符: AA:BB:CC:DD:EE:FF)
 
 // 摄像头状态
 typedef enum {
@@ -85,13 +85,15 @@ static const char *TAG = "camera_ai";
 static float g_stored_feature[FEATURE_VEC_SIZE] = {0};
 static bool g_feature_stored = false;
 
-// WiFi流媒体开关状态
-static bool g_wifi_stream_enabled = false;
-static httpd_handle_t g_stream_server = NULL;
-
 // MAC地址存储
 static char g_current_mac[MAC_ADDR_LEN + 1] = {0};
 static camera_state_t g_camera_state = CAM_STATE_WAITING_MAC;
+
+// 存储初始化状态标志
+static bool g_storage_initialized = false;
+
+// 摄像头电源状态标志
+static bool g_camera_power_on = false;
 
 // 三视图特征存储
 static float g_front_feature[FEATURE_VEC_SIZE] = {0};
@@ -201,39 +203,51 @@ static bool validate_mac_address(const char *mac)
     return true;
 }
 
-// WiFi流媒体控制
-static void wifi_stream_control(bool enable)
-{
-    if (enable && !g_wifi_stream_enabled) {
-        // 启动WiFi流媒体
-        ESP_LOGI(TAG, "Starting WiFi stream server...");
-        g_stream_server = start_camera_stream_server();
-        if (g_stream_server) {
-            g_wifi_stream_enabled = true;
-            uart_write_bytes(UART_NUM, (const char *)"WiFi stream ON\r\n", 17);
-            ESP_LOGI(TAG, "WiFi stream enabled");
-        } else {
-            uart_write_bytes(UART_NUM, (const char *)"Failed to start WiFi stream\r\n", 31);
-            ESP_LOGE(TAG, "Failed to start WiFi stream");
-        }
-    } else if (!enable && g_wifi_stream_enabled) {
-        // 停止WiFi流媒体
-        ESP_LOGI(TAG, "Stopping WiFi stream server...");
-        if (g_stream_server) {
-            stop_camera_stream_server(g_stream_server);
-            g_stream_server = NULL;
-        }
-        g_wifi_stream_enabled = false;
-        uart_write_bytes(UART_NUM, (const char *)"WiFi stream OFF\r\n", 18);
-        ESP_LOGI(TAG, "WiFi stream disabled");
-    }
-}
-
 // 从MobileNetV2模型提取特征向量
 static bool extract_feature_from_mobilenet(float *feature_vec, size_t feature_size)
 {
     ESP_LOGI(TAG, "Extracting features using MobileNetV2 wrapper...");
     return mobilenet_extract_features(feature_vec, feature_size);
+}
+
+// 关闭摄像头(节能模式)
+static void camera_power_off(void)
+{
+    if (g_camera_power_on) {
+        ESP_LOGI(TAG, "Powering off camera for energy saving...");
+        esp_err_t ret = esp_camera_deinit();
+        if (ret == ESP_OK) {
+            g_camera_power_on = false;
+            uart_write_bytes(UART_NUM, (const char *)"Camera powered OFF (energy saving mode)\r\n", 41);
+            ESP_LOGI(TAG, "Camera deinitialized successfully");
+        } else {
+            uart_write_bytes(UART_NUM, (const char *)"WARNING: Failed to power off camera\r\n", 37);
+            ESP_LOGE(TAG, "esp_camera_deinit failed: 0x%x", ret);
+        }
+    } else {
+        ESP_LOGI(TAG, "Camera already powered off");
+    }
+}
+
+// 唤醒摄像头
+static esp_err_t camera_power_on(void)
+{
+    if (!g_camera_power_on) {
+        ESP_LOGI(TAG, "Powering on camera...");
+        uart_write_bytes(UART_NUM, (const char *)"Waking up camera...\r\n", 21);
+        
+        // 重新初始化摄像头
+        init_camera();
+        
+        // 延迟等待DMA稳定
+        vTaskDelay(pdMS_TO_TICKS(300));
+        
+        g_camera_power_on = true;
+        uart_write_bytes(UART_NUM, (const char *)"Camera powered ON\r\n", 20);
+        ESP_LOGI(TAG, "Camera reinitialized successfully");
+        return ESP_OK;
+    }
+    return ESP_OK; // 已经开启
 }
 
 // 处理串口命令 - 支持MAC地址输入和WiFi控制
@@ -245,15 +259,6 @@ static void handle_uart_command(const char *cmd_str)
     int len = strlen(cmd);
     while (len > 0 && (cmd[len-1] == '\n' || cmd[len-1] == '\r')) {
         cmd[--len] = '\0';
-    }
-    
-    // WiFi开关控制
-    if (strcasecmp(cmd, "wifi on") == 0) {
-        wifi_stream_control(true);
-        return;
-    } else if (strcasecmp(cmd, "wifi off") == 0) {
-        wifi_stream_control(false);
-        return;
     }
     
     // 存储模式切换命令
@@ -289,15 +294,34 @@ static void handle_uart_command(const char *cmd_str)
         if (validate_mac_address(cmd)) {
             strncpy(g_current_mac, cmd, MAC_ADDR_LEN);
             
-            // 初始化SD卡
-            ESP_LOGI(TAG, "Initializing SD card...");
-            uart_write_bytes(UART_NUM, (const char *)"Initializing SD card...\r\n", 27);
+            // 复位看门狗（防止长耗时操作导致重启）
+            SAFE_WDT_RESET();
+            
+            // ========== 阶段2: 硬件初始化(串行化,避免并发) ==========
+            
+            // 1. 初始化摄像头
+            uart_write_bytes(UART_NUM, (const char *)"Initializing camera...\r\n", 26);
+            init_camera();
+            g_camera_power_on = true;  // 标记摄像头已开启
+            
+            // 复位看门狗
+            SAFE_WDT_RESET();
+            
+            // 2. 延迟500ms让摄像头DMA稳定
+            vTaskDelay(pdMS_TO_TICKS(500));
+            
+            // 3. 初始化SD卡存储
+            uart_write_bytes(UART_NUM, (const char *)"Initializing SD card...\r\n", 26);
             esp_err_t ret = asset_manager_init();
             if (ret != ESP_OK) {
-                uart_write_bytes(UART_NUM, (const char *)"SD card init FAILED. Continuing without storage.\r\n", 51);
-                ESP_LOGW(TAG, "SD card initialization failed: %s", esp_err_to_name(ret));
+                uart_write_bytes(UART_NUM, (const char *)"Storage init FAILED. Continuing without storage.\r\n", 50);
+                ESP_LOGW(TAG, "SD card initialization failed (0x%x). System will run without persistence.", ret);
+                
+                // 关键修复：禁用SD卡模式，防止后续操作尝试访问无效的存储
+                g_storage_initialized = false;
             } else {
-                uart_write_bytes(UART_NUM, (const char *)"SD card initialized\r\n", 23);
+                uart_write_bytes(UART_NUM, (const char *)"Storage initialized\r\n", 22);
+                g_storage_initialized = true;
                 
                 // 检查该MAC是否已存在
                 asset_record_t existing_record;
@@ -310,17 +334,14 @@ static void handle_uart_command(const char *cmd_str)
                 }
             }
             
-            // 初始化摄像头
-            ESP_LOGI(TAG, "Initializing camera for MAC: %s", g_current_mac);
-            uart_write_bytes(UART_NUM, (const char *)"Initializing camera...\r\n", 26);
-            init_camera();
+            // 复位看门狗
+            SAFE_WDT_RESET();
             
             g_camera_state = CAM_STATE_READY;
             
             char msg[128];
             snprintf(msg, sizeof(msg), "MAC address set: %s\r\n", g_current_mac);
             uart_write_bytes(UART_NUM, (const char *)msg, strlen(msg));
-            ESP_LOGI(TAG, "MAC address set: %s", g_current_mac);
             
             // 提示用户可以进行三视图拍摄
             uart_write_bytes(UART_NUM, (const char *)"=== Asset Registration Mode ===\r\n", 34);
@@ -329,14 +350,16 @@ static void handle_uart_command(const char *cmd_str)
             uart_write_bytes(UART_NUM, (const char *)"Send 't' to capture TOP view\r\n", 31);
             uart_write_bytes(UART_NUM, (const char *)"Send 'c' to check inventory\r\n", 30);
             uart_write_bytes(UART_NUM, (const char *)"Send 'l' to list all assets\r\n", 30);
+            uart_write_bytes(UART_NUM, (const char *)"Send 'p' to power OFF camera (save energy)\r\n", 45);
+            uart_write_bytes(UART_NUM, (const char *)"Send 'w' to wake UP camera\r\n", 29);
             uart_write_bytes(UART_NUM, (const char *)"Send 'r' to reset and input new MAC\r\n", 37);
+
         } else {
             uart_write_bytes(UART_NUM, (const char *)"Invalid MAC format. Use XX:XX:XX:XX:XX:XX\r\n", 42);
-            ESP_LOGW(TAG, "Invalid MAC address format: %s", cmd);
         }
         return;
     }
-    
+
     // 摄像头就绪状态下的命令处理
     if (g_camera_state == CAM_STATE_READY) {
         switch (cmd[0]) {
@@ -404,25 +427,49 @@ static void handle_uart_command(const char *cmd_str)
                     g_view_state = VIEW_TOP;
                     uart_write_bytes(UART_NUM, (const char *)"TOP view captured successfully\r\n", 34);
                     
-                    // 保存资产记录到SD卡
-                    asset_record_t record;
-                    strncpy(record.mac_address, g_current_mac, MAC_ADDR_LEN);
-                    record.mac_address[MAC_ADDR_LEN] = '\0';
-                    memcpy(record.front_feature, g_front_feature, sizeof(g_front_feature));
-                    memcpy(record.side_feature, g_side_feature, sizeof(g_side_feature));
-                    memcpy(record.top_feature, g_top_feature, sizeof(g_top_feature));
-                    record.is_valid = true;
+                    // 【关键修复】推理完成后增加额外延迟,确保堆管理器稳定
+                    // 这是防止fopen崩溃的关键步骤
+                    ESP_LOGI(TAG, "Waiting for heap stabilization after inference...");
+                    vTaskDelay(pdMS_TO_TICKS(500));  // 额外等待500ms
                     
-                    esp_err_t ret = asset_save(&record);
-                    if (ret == ESP_OK) {
-                        uart_write_bytes(UART_NUM, (const char *)"Asset SAVED to SD card\r\n", 26);
+                    // 复位看门狗，准备保存数据
+                    SAFE_WDT_RESET();
+                    
+                    // 保存资产记录到SD卡（仅在存储已初始化时）
+                    if (g_storage_initialized) {
+                        ESP_LOGI(TAG, "Starting asset save operation...");
+                        
+                        // 【关键修复】使用静态变量避免栈溢出(15KB结构体!)
+                        static asset_record_t record;
+                        strncpy(record.mac_address, g_current_mac, MAC_ADDR_LEN);
+                        record.mac_address[MAC_ADDR_LEN] = '\0';
+                        memcpy(record.front_feature, g_front_feature, sizeof(g_front_feature));
+                        memcpy(record.side_feature, g_side_feature, sizeof(g_side_feature));
+                        memcpy(record.top_feature, g_top_feature, sizeof(g_top_feature));
+                        record.is_valid = true;
+                        
+                        esp_err_t ret = asset_save(&record);
+                        if (ret == ESP_OK) {
+                            uart_write_bytes(UART_NUM, (const char *)"Asset SAVED to SD card\r\n", 26);
+                            ESP_LOGI(TAG, "Asset saved successfully");
+                        } else {
+                            uart_write_bytes(UART_NUM, (const char *)"WARNING: Failed to save to SD card\r\n", 36);
+                            ESP_LOGE(TAG, "asset_save failed with error: 0x%x", ret);
+                        }
                     } else {
-                        uart_write_bytes(UART_NUM, (const char *)"WARNING: Failed to save to SD card\r\n", 36);
+                        uart_write_bytes(UART_NUM, (const char *)"SKIPPED: Storage not initialized\r\n", 35);
+                        ESP_LOGW(TAG, "Asset registration completed but NOT saved (storage unavailable)");
                     }
                     
                     uart_write_bytes(UART_NUM, (const char *)"=== All three views completed! ===\r\n", 36);
                     uart_write_bytes(UART_NUM, (const char *)"Asset registered. Send 'c' for inventory check\r\n", 50);
                     ESP_LOGI(TAG, "Top view feature stored - registration complete");
+                    
+                    // ========== 节能功能: 三视图完成后自动关闭摄像头 ==========
+                    vTaskDelay(pdMS_TO_TICKS(200)); // 短暂延迟让用户看到完成提示
+                    camera_power_off();
+                    uart_write_bytes(UART_NUM, (const char *)"\r\n[Energy Saving] Camera auto-off after registration\r\n", 54);
+                    uart_write_bytes(UART_NUM, (const char *)"Send 'w' to wake up camera when needed\r\n", 41);
                 } else {
                     uart_write_bytes(UART_NUM, (const char *)"TOP view capture FAILED\r\n", 27);
                     ESP_LOGE(TAG, "Failed to capture top view");
@@ -463,6 +510,12 @@ static void handle_uart_command(const char *cmd_str)
                     uart_write_bytes(UART_NUM, (const char *)"Registration not complete\r\n", 28);
                     break;
                 }
+                
+                // 节能功能: 如果摄像头已关闭,先唤醒
+                if (!g_camera_power_on) {
+                    camera_power_on();
+                }
+                
                 ESP_LOGI(TAG, "Inventory: Capturing FRONT view for comparison");
                 uart_write_bytes(UART_NUM, (const char *)"Capturing FRONT view for comparison...\r\n", 41);
                 
@@ -492,6 +545,12 @@ static void handle_uart_command(const char *cmd_str)
                     uart_write_bytes(UART_NUM, (const char *)"Registration not complete\r\n", 28);
                     break;
                 }
+                
+                // 节能功能: 如果摄像头已关闭,先唤醒
+                if (!g_camera_power_on) {
+                    camera_power_on();
+                }
+                
                 ESP_LOGI(TAG, "Inventory: Capturing SIDE view for comparison");
                 uart_write_bytes(UART_NUM, (const char *)"Capturing SIDE view for comparison...\r\n", 40);
                 
@@ -521,6 +580,12 @@ static void handle_uart_command(const char *cmd_str)
                     uart_write_bytes(UART_NUM, (const char *)"Registration not complete\r\n", 28);
                     break;
                 }
+                
+                // 节能功能: 如果摄像头已关闭,先唤醒
+                if (!g_camera_power_on) {
+                    camera_power_on();
+                }
+                
                 ESP_LOGI(TAG, "Inventory: Capturing TOP view for comparison");
                 uart_write_bytes(UART_NUM, (const char *)"Capturing TOP view for comparison...\r\n", 39);
                 
@@ -544,6 +609,24 @@ static void handle_uart_command(const char *cmd_str)
                 }
                 break;
                 
+            case 'p':
+            case 'P':
+                // 手动关闭摄像头(节能)
+                ESP_LOGI(TAG, "Manual camera power off requested");
+                camera_power_off();
+                break;
+                
+            case 'w':
+            case 'W':
+                // 手动唤醒摄像头
+                if (g_camera_state != CAM_STATE_READY) {
+                    uart_write_bytes(UART_NUM, (const char *)"System not ready. Please input MAC first\r\n", 42);
+                    break;
+                }
+                ESP_LOGI(TAG, "Manual camera wake up requested");
+                camera_power_on();
+                break;
+                
             case 'r':
             case 'R':
                 // 重置状态，重新输入MAC地址
@@ -554,11 +637,15 @@ static void handle_uart_command(const char *cmd_str)
                 memset(g_side_feature, 0, sizeof(g_side_feature));
                 memset(g_top_feature, 0, sizeof(g_top_feature));
                 
-                // 注意：不卸载SD卡，保持挂载状态以便下次使用
+                // 关闭摄像头
+                if (g_camera_power_on) {
+                    camera_power_off();
+                }
+                
+                ESP_LOGI(TAG, "System reset (Storage remains active)");
                 
                 uart_write_bytes(UART_NUM, (const char *)"=== System Reset ===\r\n", 23);
                 uart_write_bytes(UART_NUM, (const char *)"Please input MAC address (format: XX:XX:XX:XX:XX:XX):\r\n", 58);
-                ESP_LOGI(TAG, "System reset, waiting for new MAC address");
                 break;
                 
             default:
@@ -571,6 +658,9 @@ static void handle_uart_command(const char *cmd_str)
 // UART 接收任务 - 修改为按行读取
 static void uart_task(void *pvParameters)
 {
+    // 注册当前任务到看门狗监控列表
+    SAFE_WDT_ADD();
+    
     uint8_t *data = (uint8_t *) malloc(UART_BUF_SIZE);
     char line_buf[128] = {0};
     int line_pos = 0;
@@ -597,41 +687,13 @@ static void uart_task(void *pvParameters)
                 }
             }
         }
+        
+        // 定期复位看门狗，防止长耗时操作导致重启
+        SAFE_WDT_RESET();
     }
     
     free(data);
     vTaskDelete(NULL);
-}
-
-static void wifi_init_softap(void)
-{
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_ap();
-
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-
-    wifi_config_t wifi_config = {
-        .ap = {
-            .ssid = WIFI_SSID,
-            .ssid_len = 0,
-            .channel = 1,
-            .password = WIFI_PASS,
-            .max_connection = MAX_STA_CONN,
-            .authmode = WIFI_AUTH_WPA_WPA2_PSK,
-        },
-    };
-
-    if (strlen(WIFI_PASS) == 0) {
-        wifi_config.ap.authmode = WIFI_AUTH_OPEN;
-    }
-
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
-    ESP_ERROR_CHECK(esp_wifi_start());
-
-    ESP_LOGI(TAG, "WiFi AP started. SSID:%s password:%s", WIFI_SSID, WIFI_PASS);
 }
 
 void app_main(void)
@@ -650,15 +712,6 @@ void app_main(void)
     
     // 注意：此时不初始化摄像头，等待MAC地址输入后再启动
     
-    wifi_init_softap();
-    ESP_LOGI(TAG, "WiFi AP initialized");
-    
-    // 等待 WiFi 完全启动
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    
-    // 默认不启动HTTP服务器，等待用户通过串口开启
-    ESP_LOGI(TAG, "WiFi stream disabled by default. Use 'wifi on' to enable");
-    
     // 初始化MobileNetV2模型
     ESP_LOGI(TAG, "Initializing MobileNetV2 model...");
     if (mobilenet_init()) {
@@ -672,11 +725,13 @@ void app_main(void)
 
     uart_write_bytes(UART_NUM, (const char *)"\r\n=== ESP32-CAM AI Asset Management System ===\r\n", 50);
     uart_write_bytes(UART_NUM, (const char *)"Please input MAC address (format: XX:XX:XX:XX:XX:XX):\r\n", 58);
-    uart_write_bytes(UART_NUM, (const char *)"Commands:\r\n", 11);
-    uart_write_bytes(UART_NUM, (const char *)"  wifi on/off   - Enable/disable WiFi stream\r\n", 44);
-    uart_write_bytes(UART_NUM, (const char *)"  storage sd    - Switch to SD Card mode\r\n", 41);
-    uart_write_bytes(UART_NUM, (const char *)"  storage flash - Switch to SPIFFS (Flash) mode\r\n", 49);
-    uart_write_bytes(UART_NUM, (const char *)"  storage status - Show current storage mode\r\n", 46);
+    uart_write_bytes(UART_NUM, (const char *)"\r\n", 2);
+    uart_write_bytes(UART_NUM, (const char *)"Quick Reference:\r\n", 18);
+    uart_write_bytes(UART_NUM, (const char *)"  Registration: f(front) -> s(side) -> t(top)\r\n", 49);
+    uart_write_bytes(UART_NUM, (const char *)"  Inventory:  c(enter mode) -> 1/2/3(compare)\r\n", 49);
+    uart_write_bytes(UART_NUM, (const char *)"  Power:      p(off) / w(on) - Auto off after registration\r\n", 63);
+    uart_write_bytes(UART_NUM, (const char *)"  Storage:    storage sd/flash/status\r\n", 38);
+    uart_write_bytes(UART_NUM, (const char *)"  Reset:      r - Clear all and restart\r\n", 39);
     uart_write_bytes(UART_NUM, (const char *)"\r\n", 2);
 
     while (true) {

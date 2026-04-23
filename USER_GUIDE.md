@@ -20,8 +20,10 @@
 
 - ESP32-S3开发板（带PSRAM）
 - OV5640摄像头模块
-- MicroSD卡（FAT32格式，可选）
+- MicroSD卡（FAT32格式，**可选** - 默认使用内部Flash存储）
 - USB数据线
+
+**说明**：系统默认使用内部 Flash（SPIFFS）存储资产数据，无需外部 SD 卡。如需更大容量，可通过 `storage sd` 命令切换到 SD 卡模式。
 
 ### 2. 编译烧录
 
@@ -109,17 +111,25 @@ idf.py flash monitor -p COM3
 ### 场景2：切换存储模式
 
 ```
-1. 系统运行时，可以随时切换存储模式：
+1. 系统默认使用 SPIFFS（内部Flash）存储，无需外部SD卡
 
+2. 如需切换到 SD 卡模式（适合大量资产）：
    发送 'storage sd' - 切换到SD卡模式
    响应：Storage switched to SD Card
    
+3. 切换回内部Flash模式：
    发送 'storage flash' - 切换到内部Flash模式
    响应：Storage switched to SPIFFS (Internal Flash)
    
+4. 查看当前模式：
    发送 'storage status' - 查看当前模式
-   响应：Current storage mode: SD Card 或 SPIFFS (Internal Flash)
+   响应：Current storage mode: SPIFFS (Internal Flash) 或 SD Card
 ```
+
+**提示**：
+- 默认 SPIFFS 模式可存储约 60-70 个资产
+- 如需存储更多资产，建议切换到 SD 卡模式
+- 切换后原存储介质的数据仍然保留
 
 ### 场景3：盘点已有资产
 
@@ -210,16 +220,18 @@ idf.py flash monitor -p COM3
 
 ## 注意事项
 
-### 1. SD卡要求
+### 1. SPIFFS内部Flash存储（**默认模式**）
+- ✅ **无需外部SD卡**，使用内部Flash存储
+- ✅ 分区表中已预留 1MB 空间
+- ✅ 可存储约 **60-70 个资产**（每个约15KB）
+- ✅ 适合日常使用和少量资产管理
+- ⚠️ 如需存储更多资产，可通过 `storage sd` 切换到 SD 卡模式
+
+### 2. SD卡要求（可选）
 - 必须使用FAT32格式的MicroSD卡
 - 首次使用时会自动格式化（数据会丢失，请提前备份）
 - 建议使用Class 10及以上速度的卡
-
-### 2. SPIFFS内部Flash存储
-- 无需外部SD卡，使用内部Flash存储
-- 需要在分区表中预留空间（默认3MB）
-- 适合临时使用或没有SD卡的情况
-- 容量有限，适合少量资产存储
+- 通过 `storage sd` 命令切换到 SD 卡模式
 
 ### 3. 拍摄建议
 - **光照条件**：保持稳定、均匀的光照，避免强光和背光

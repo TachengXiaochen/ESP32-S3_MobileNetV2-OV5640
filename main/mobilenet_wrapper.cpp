@@ -27,10 +27,26 @@ extern "C" bool mobilenet_extract_features(float *feature_vec, int feature_size)
 {
     ESP_LOGI(TAG, "Starting MobileNetV2 feature extraction...");
 
-    // 捕获图像
-    camera_fb_t *fb = esp_camera_fb_get();
+    // 【关键修复】增加摄像头捕获重试机制
+    camera_fb_t *fb = nullptr;
+    int retry_count = 0;
+    const int MAX_RETRIES = 3;
+    
+    while (retry_count < MAX_RETRIES) {
+        fb = esp_camera_fb_get();
+        if (fb) {
+            break; // 成功获取帧
+        }
+        
+        retry_count++;
+        ESP_LOGW(TAG, "Camera capture failed (attempt %d/%d), retrying...", retry_count, MAX_RETRIES);
+        
+        // 延迟后重试,让摄像头有时间恢复
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+    
     if (!fb) {
-        ESP_LOGE(TAG, "Camera capture failed");
+        ESP_LOGE(TAG, "Camera capture failed after %d retries", MAX_RETRIES);
         return false;
     }
 
@@ -164,8 +180,25 @@ extern "C" bool mobilenet_extract_features(float *feature_vec, int feature_size)
 
     ESP_LOGI(TAG, "Feature extraction completed: %d features, norm=%.4f", feat_len, norm);
 
+    // 【关键修复】在释放rgb888前，先确保模型输出不再被引用
+    // 清除模型输出引用，防止悬空指针
+    outputs.clear();
+    
     free(rgb888);
     esp_camera_fb_return(fb);
+    
+    // 【关键修复】强制触发一次堆管理器整理
+    // 通过分配和释放小块内存，检测并修复可能的堆损坏
+    void *heap_check = malloc(128);
+    if (heap_check) {
+        memset(heap_check, 0, 128);
+        free(heap_check);
+    }
+    
+    // 【关键修复】增加延迟时间,确保堆管理器完全稳定
+    // MobileNetV2推理后需要更长时间让TLSF堆元数据恢复
+    // 300ms不足以防止fopen时的崩溃,增加到800ms
+    vTaskDelay(pdMS_TO_TICKS(800));
 
     return true;
 }

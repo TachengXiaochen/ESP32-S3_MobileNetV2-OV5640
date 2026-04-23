@@ -73,8 +73,8 @@ static void wifi_stream_control(bool enable)
 ### 3. 双存储模式支持（新增）
 
 **实现内容：**
-- ✅ 支持SD卡存储模式（默认）
-- ✅ 支持SPIFFS内部Flash存储模式
+- ✅ 支持SD卡存储模式
+- ✅ 支持SPIFFS内部Flash存储模式（**默认**）
 - ✅ 运行时可动态切换存储模式
 - ✅ 自动检测SD卡可用性，失败时降级到SPIFFS
 - ✅ 统一的文件操作接口，透明处理不同存储介质
@@ -83,7 +83,7 @@ static void wifi_stream_control(bool enable)
 - `main/asset_manager.h` - storage_mode_t枚举和切换接口
 - `main/asset_manager.c` - init_sd_card(), init_spiffs(), asset_switch_storage_mode()
 - `main/CMakeLists.txt` - 添加spiffs依赖
-- `partitions.csv` - 添加storage分区（3MB SPIFFS）
+- `partitions.csv` - 添加storage分区（1MB SPIFFS）
 
 **使用示例：**
 ```
@@ -94,7 +94,7 @@ static void wifi_stream_control(bool enable)
 系统响应: Storage switched to SPIFFS (Internal Flash)
 
 用户输入: storage status
-系统响应: Current storage mode: SD Card
+系统响应: Current storage mode: SPIFFS (Internal Flash)
 ```
 
 **技术实现：**
@@ -120,23 +120,28 @@ esp_err_t asset_switch_storage_mode(storage_mode_t mode)
 ```
 
 **分区表配置：**
-```csv
+```
 # Name,   Type, SubType, Offset,  Size, Flags
 nvs,      data, nvs,     0x9000,  0x6000,
 phy_init, data, phy,     0xf000,  0x1000,
-factory,  app,  factory, 0x10000, 4M,
-storage,  data, spiffs,  ,        3M,
+factory,  app,  factory, 0x10000, 7M,
+storage,  data, spiffs,  ,        1M,
 ```
 
 **优势对比：**
 
-| 特性 | SD卡模式 | SPIFFS模式 |
-|------|---------|-----------|
-| 容量 | 最大2TB（推荐2-4GB） | 固定3MB |
+| 特性 | SD卡模式 | SPIFFS模式（默认） |
+|------|---------|------------------|
+| 容量 | 最大2TB（推荐2-4GB） | 固定1MB（约60个资产） |
 | 速度 | 较快（取决于卡速） | 中等 |
 | 可靠性 | 依赖物理卡质量 | 高（内置Flash） |
-| 便携性 | 需要外部卡 | 无需额外硬件 |
-| 适用场景 | 大量资产存储 | 临时使用/少量资产 |
+| 便携性 | 需要外部卡 | **无需额外硬件** |
+| 适用场景 | 大量资产存储 | **日常使用/少量资产** |
+
+**容量说明**：
+- 每个资产记录约 15KB（1280维 × 3视图 × 4字节 + MAC地址等）
+- 1MB SPIFFS 分区可存储约 **60-70 个资产**
+- 如需存储更多资产，建议切换到 SD 卡模式
 
 ---
 

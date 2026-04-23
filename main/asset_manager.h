@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 // 资产记录结构
-#define MAC_ADDR_LEN 18
+#define MAC_ADDR_LEN 17
 #define FEATURE_VEC_SIZE 1280
 
 typedef struct {

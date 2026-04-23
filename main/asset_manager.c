@@ -4,28 +4,30 @@
 #include "sdmmc_cmd.h"
 #include "driver/sdmmc_host.h"
 #include "driver/sdmmc_defs.h"
-#include "esp_spiffs.h"
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <errno.h>
 
 static const char *TAG = "asset_manager";
 
 // SD卡配置（ESP32-S3常见引脚）
-#define SD_PIN_CLK  14
-#define SD_PIN_CMD  15
-#define SD_PIN_D0   2
-#define SD_PIN_D1   3
-#define SD_PIN_D2   4
-#define SD_PIN_D3   5
+// ⚠️ 重要: 根据实际硬件连接修改以下引脚定义
+// 当前配置对应: CLK=GPIO39, CMD=GPIO38, D0=GPIO40
+#define SD_PIN_CLK  39
+#define SD_PIN_CMD  38
+#define SD_PIN_D0   40
+// 1位模式下不需要CS和D1-D3，但保留定义供参考
+// #define SD_PIN_CS   37
+// #define SD_PIN_D1   -1
+// #define SD_PIN_D2   -1  
+// #define SD_PIN_D3   -1
 
 #define MOUNT_POINT_SD "/sdcard"
 #define ASSET_DIR_SD   "/sdcard/assets"
-#define MOUNT_POINT_SPIFFS "/spiffs"
-#define ASSET_DIR_SPIFFS   "/spiffs/assets"
 
-// 存储模式
+// 存储模式（固定使用SD卡）
 static storage_mode_t g_current_storage_mode = STORAGE_MODE_SD_CARD;
 static bool g_storage_initialized = false;
 static sdmmc_card_t *g_card = NULL;
@@ -37,9 +39,9 @@ static esp_err_t init_sd_card(void)
 {
     ESP_LOGI(TAG, "Initializing SD card...");
 
-    // 选项：挂载文件系统
+    // SD卡挂载配置
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-        .format_if_mount_failed = true,  // 如果挂载失败则格式化
+        .format_if_mount_failed = false,
         .max_files = 10,
         .allocation_unit_size = 16 * 1024
     };
@@ -47,7 +49,11 @@ static esp_err_t init_sd_card(void)
     // SDMMC主机配置（使用1位模式以节省引脚）
     sdmmc_host_t host = SDMMC_HOST_DEFAULT();
     host.flags = SDMMC_HOST_FLAG_1BIT;  // 使用1位模式
-    host.max_freq_khz = SDMMC_FREQ_DEFAULT;
+    
+    // 【调试选项】如果SD卡初始化仍失败,可尝试降低时钟频率:
+    // host.max_freq_khz = SDMMC_FREQ_PROBING;  // 400kHz (最稳定,用于调试)
+    // host.max_freq_khz = 10000;               // 10MHz (中等速度)
+    host.max_freq_khz = SDMMC_FREQ_DEFAULT;     // 20MHz (默认,正常应工作)
 
     // SDMMC槽配置
     sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
@@ -55,16 +61,39 @@ static esp_err_t init_sd_card(void)
     slot_config.cmd = SD_PIN_CMD;
     slot_config.d0 = SD_PIN_D0;
     slot_config.width = 1;  // 1位模式
+    slot_config.flags = SDMMC_SLOT_FLAG_INTERNAL_PULLUP;  // 启用内部上拉
     
-    // 设置GPIO功能
+    // 设置GPIO驱动能力(高编号GPIO需要更强的驱动)
     gpio_set_drive_capability(SD_PIN_CLK, GPIO_DRIVE_CAP_3);
     gpio_set_drive_capability(SD_PIN_CMD, GPIO_DRIVE_CAP_3);
     gpio_set_drive_capability(SD_PIN_D0, GPIO_DRIVE_CAP_3);
+    
+    ESP_LOGI(TAG, "SD card pins configured: CLK=%d, CMD=%d, D0=%d", 
+             SD_PIN_CLK, SD_PIN_CMD, SD_PIN_D0);
 
     // 挂载SD卡
     esp_err_t ret = esp_vfs_fat_sdmmc_mount(MOUNT_POINT_SD, &host, &slot_config, &mount_config, &g_card);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to mount SD card (%s)", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "Failed to mount SD card (0x%x - %s)", ret, esp_err_to_name(ret));
+        
+        // 详细错误诊断
+        switch (ret) {
+            case ESP_ERR_TIMEOUT:
+                ESP_LOGE(TAG, "Possible causes:");
+                ESP_LOGE(TAG, "  1. SD card not inserted properly");
+                ESP_LOGE(TAG, "  2. Wrong pin configuration (CLK=%d, CMD=%d, D0=%d)", 
+                         SD_PIN_CLK, SD_PIN_CMD, SD_PIN_D0);
+                ESP_LOGE(TAG, "  3. SD card damaged or incompatible");
+                ESP_LOGE(TAG, "  4. Power supply insufficient");
+                break;
+            case ESP_ERR_INVALID_STATE:
+                ESP_LOGE(TAG, "SD card already mounted or in invalid state");
+                break;
+            default:
+                ESP_LOGE(TAG, "Unknown error code: 0x%x", ret);
+                break;
+        }
+        
         return ret;
     }
 
@@ -83,55 +112,11 @@ static esp_err_t init_sd_card(void)
 }
 
 /**
- * @brief 初始化SPIFFS
- */
-static esp_err_t init_spiffs(void)
-{
-    ESP_LOGI(TAG, "Initializing SPIFFS...");
-
-    esp_vfs_spiffs_conf_t conf = {
-        .base_path = MOUNT_POINT_SPIFFS,
-        .partition_label = NULL,
-        .max_files = 10,
-        .format_if_mount_failed = true
-    };
-
-    esp_err_t ret = esp_vfs_spiffs_register(&conf);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to mount or format SPIFFS (%s)", esp_err_to_name(ret));
-        return ret;
-    }
-
-    size_t total = 0, used = 0;
-    ret = esp_spiffs_info(NULL, &total, &used);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to get SPIFFS partition information (%s)", esp_err_to_name(ret));
-        return ret;
-    }
-
-    ESP_LOGI(TAG, "Partition size: total=%d, used=%d", total, used);
-
-    // 创建资产目录
-    struct stat st;
-    if (stat(ASSET_DIR_SPIFFS, &st) != 0) {
-        ESP_LOGI(TAG, "Creating assets directory: %s", ASSET_DIR_SPIFFS);
-        mkdir(ASSET_DIR_SPIFFS, 0755);
-    }
-
-    ESP_LOGI(TAG, "SPIFFS initialized successfully");
-    return ESP_OK;
-}
-
-/**
  * @brief 获取当前存储路径
  */
 static void get_current_asset_dir(char *path, size_t path_size)
 {
-    if (g_current_storage_mode == STORAGE_MODE_SD_CARD) {
-        snprintf(path, path_size, "%s", ASSET_DIR_SD);
-    } else {
-        snprintf(path, path_size, "%s", ASSET_DIR_SPIFFS);
-    }
+    snprintf(path, path_size, "%s", ASSET_DIR_SD);
 }
 
 /**
@@ -157,36 +142,18 @@ static void get_asset_file_path(const char *mac_address, char *path, size_t path
 }
 
 /**
- * @brief 初始化资产管理器（根据当前模式挂载对应存储）
+ * @brief 初始化资产管理器（固定使用SD卡）
  */
 esp_err_t asset_manager_init(void)
 {
     if (g_storage_initialized) {
-        ESP_LOGW(TAG, "Storage already initialized");
         return ESP_OK;
     }
 
-    esp_err_t ret = ESP_OK;
-    
-    if (g_current_storage_mode == STORAGE_MODE_SD_CARD) {
-        ret = init_sd_card();
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "SD card init failed, fallback to SPIFFS mode");
-            g_current_storage_mode = STORAGE_MODE_SPIFFS;
-            ret = init_spiffs();
-        }
-    } else {
-        ret = init_spiffs();
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "SPIFFS init failed");
-            return ret;
-        }
-    }
+    esp_err_t ret = init_sd_card();
 
     if (ret == ESP_OK) {
         g_storage_initialized = true;
-        ESP_LOGI(TAG, "Asset manager initialized with %s mode", 
-                 g_current_storage_mode == STORAGE_MODE_SD_CARD ? "SD Card" : "SPIFFS");
     }
 
     return ret;
@@ -218,7 +185,9 @@ esp_err_t asset_save(const asset_record_t *record)
         return ESP_FAIL;
     }
 
-    // 写入资产记录
+    // 【关键修复】直接写入传入的record指针,避免在栈上创建副本
+    // 原代码: fwrite(record, sizeof(asset_record_t), 1, f) 是正确的
+    // 但调用方在栈上创建了15KB的临时变量,导致栈溢出风险
     size_t written = fwrite(record, sizeof(asset_record_t), 1, f);
     fclose(f);
 
@@ -379,52 +348,31 @@ storage_mode_t asset_get_storage_mode(void)
 }
 
 /**
- * @brief 切换存储模式
+ * @brief 切换存储模式（已禁用，固定为SD卡）
  */
 esp_err_t asset_switch_storage_mode(storage_mode_t mode)
 {
-    if (g_current_storage_mode == mode) {
-        ESP_LOGI(TAG, "Already in %s mode", 
-                 mode == STORAGE_MODE_SD_CARD ? "SD Card" : "SPIFFS");
-        return ESP_OK;
+    if (mode != STORAGE_MODE_SD_CARD) {
+        ESP_LOGW(TAG, "Storage mode is fixed to SD Card. Switching failed.");
+        return ESP_ERR_NOT_SUPPORTED;
     }
-
-    // 先反初始化当前存储
-    asset_manager_deinit();
-
-    // 切换模式
-    g_current_storage_mode = mode;
-
-    // 初始化新模式
-    esp_err_t ret = asset_manager_init();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize new storage mode: %s", 
-                 mode == STORAGE_MODE_SD_CARD ? "SD Card" : "SPIFFS");
-        // 回滚到之前的模式
-        g_current_storage_mode = (mode == STORAGE_MODE_SD_CARD) ? STORAGE_MODE_SPIFFS : STORAGE_MODE_SD_CARD;
-        asset_manager_init(); // 尝试恢复到旧模式
-        return ret;
-    }
-
-    ESP_LOGI(TAG, "Switched to %s mode successfully", 
-             mode == STORAGE_MODE_SD_CARD ? "SD Card" : "SPIFFS");
+    
     return ESP_OK;
 }
 
 /**
- * @brief 反初始化管理器（卸载存储）
+ * @brief 反初始化管理器（卸载SD卡）
  */
 void asset_manager_deinit(void)
 {
-    if (g_storage_initialized) {
-        if (g_current_storage_mode == STORAGE_MODE_SD_CARD) {
-            esp_vfs_fat_sdcard_unmount(MOUNT_POINT_SD, g_card);
-            g_card = NULL;
-            ESP_LOGI(TAG, "SD card unmounted");
-        } else {
-            esp_vfs_spiffs_unregister(MOUNT_POINT_SPIFFS);
-            ESP_LOGI(TAG, "SPIFFS unmounted");
-        }
-        g_storage_initialized = false;
+    if (!g_storage_initialized) {
+        return; // 未初始化，直接返回
     }
+
+    if (g_card != NULL) {
+        esp_vfs_fat_sdcard_unmount(MOUNT_POINT_SD, g_card);
+        g_card = NULL;
+    }
+    
+    g_storage_initialized = false;
 }
