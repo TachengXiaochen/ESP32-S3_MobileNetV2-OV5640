@@ -27,7 +27,7 @@
 
 #### 任务间通信
 使用 **FreeRTOS Queue** 实现异步解耦：
-```c
+```
 typedef struct {
     system_cmd_t cmd;      // 命令类型
     void *data;            // 数据指针（如特征向量）
@@ -54,7 +54,7 @@ xQueueReceive(xSystemQueue, &msg, portMAX_DELAY);
 #### 算法实现
 
 **置信度计算**：
-```c
+```
 // 计算特征向量的L2范数
 float norm = 0.0f;
 for (int i = 0; i < FEATURE_VEC_SIZE; i++) {
@@ -64,7 +64,7 @@ norm = sqrtf(norm);
 ```
 
 **加权融合**：
-```c
+```
 const float weights[3] = {0.5f, 0.3f, 0.2f}; // 正面、侧面、顶部
 float weighted_confidence = 
     (conf_front * 0.5 + conf_side * 0.3 + conf_top * 0.2) / total_weight;
@@ -102,7 +102,7 @@ float weighted_confidence =
 - ✅ 跨任务传递时字符串安全截断
 
 #### 关键代码
-```c
+```
 static bool validate_mac_address(const char *mac)
 {
     if (strlen(mac) != MAC_ADDR_LEN) return false;
@@ -162,14 +162,14 @@ static bool validate_mac_address(const char *mac)
 
 #### 封装层设计
 [mobilenet_wrapper.cpp](main/mobilenet_wrapper.cpp) 提供C接口：
-```cpp
+```
 extern "C" bool mobilenet_init(void);
 extern "C" bool mobilenet_extract_features(float *feature_vec, int feature_size);
 extern "C" void mobilenet_deinit(void);
 ```
 
 #### 重试机制
-```c
+```
 // 摄像头捕获重试（最多3次）
 while (retry_count < MAX_RETRIES) {
     fb = esp_camera_fb_get();
@@ -188,7 +188,7 @@ while (retry_count < MAX_RETRIES) {
 
 #### 解决方案
 在所有任务中注册看门狗并定期复位：
-```c
+```
 static void camera_ai_task(void *pvParameters)
 {
     esp_task_wdt_add(NULL);  // 注册到看门狗
@@ -262,7 +262,7 @@ static void camera_ai_task(void *pvParameters)
 ## 🔧 编译配置
 
 ### CMakeLists.txt
-```cmake
+```
 idf_component_register(
     SRCS "main.c" "asset_manager.c" "camera_module.c" 
          "storage_module.c" "ai_module.c" "mobilenet_wrapper.cpp"
@@ -303,6 +303,70 @@ idf_component_register(
 
 ---
 
-**文档版本**: v2.2  
+## 🔄 v2.3 更新详情（2026-04-25）
+
+### ✨ 新增功能
+
+#### 1. 智能匹配判断
+- **功能描述**：在盘点结果中自动判断是否为同一物品
+- **实现位置**：[main.c](file://d:\Users\TcXc\Desktop\Program_ESP32-S3CAM\CAM_AI\main\main.c) `CMD_START_INVENTORY` 处理逻辑
+- **阈值设定**：`MATCH_THRESHOLD = 0.75f`
+- **输出格式**：
+  ```
+  Threshold: 0.75
+  ✅ MATCH - Same Asset        (置信度 ≥ 0.75)
+  ❌ NO MATCH - Different Asset (置信度 < 0.75)
+  ```
+- **技术原理**：基于加权置信度与阈值的比较判断
+
+#### 2. 开机自动初始化存储
+- **功能描述**：系统在启动时自动初始化SD卡，失败时支持动态重试
+- **实现位置**：
+  - [main.c](file://d:\Users\TcXc\Desktop\Program_ESP32-S3CAM\CAM_AI\main\main.c) `app_main()` 函数
+  - [cmd_handler.c](file://d:\Users\TcXc\Desktop\Program_ESP32-S3CAM\CAM_AI\main\cmd_handler.c) 按需重试逻辑
+- **关键改进**：
+  - 增加看门狗复位防止超时
+  - 增加100ms延迟让硬件稳定
+  - 失败不阻塞启动，标记为未就绪
+  - 首次使用时尝试重新初始化
+- **用户体验**：所有操作响应迅速，无需等待初始化
+
+#### 3. 资产覆盖功能
+- **功能描述**：注册相同MAC地址时自动覆盖原有数据，并明确提示用户
+- **实现位置**：
+  - [asset_manager.h](file://d:\Users\TcXc\Desktop\Program_ESP32-S3CAM\CAM_AI\main\asset_manager.h) 添加 `is_overwrite` 输出参数
+  - [asset_manager.c](file://d:\Users\TcXc\Desktop\Program_ESP32-S3CAM\CAM_AI\main\asset_manager.c) `asset_save()` 函数检测文件是否存在
+  - [storage_module.h](file://d:\Users\TcXc\Desktop\Program_ESP32-S3CAM\CAM_AI\main\storage_module.h) 定义 `save_result_t` 枚举
+  - [main.c](file://d:\Users\TcXc\Desktop\Program_ESP32-S3CAM\CAM_AI\main\main.c) 根据结果显示不同提示
+- **提示信息**：
+  - 首次注册：`Asset saved to SD card successfully.`
+  - 覆盖更新：`Asset UPDATED (overwritten) on SD card.`
+
+#### 4. 修复稳定性问题
+- **问题描述**：`pdMS_TO_TISKS` 拼写错误导致编译失败
+- **影响文件**：
+  - [asset_manager.c](file://d:\Users\TcXc\Desktop\Program_ESP32-S3CAM\CAM_AI\main\asset_manager.c) 第225行
+  - [storage_module.c](file://d:\Users\TcXc\Desktop\Program_ESP32-S3CAM\CAM_AI\main\storage_module.c) 第26行
+- **修复方案**：统一修正为 `pdMS_TO_TICKS`
+- **预防措施**：创建记忆规范，避免将来再次犯错
+
+### 📊 技术架构变更
+
+| 模块 | 变更内容 | 影响范围 |
+|------|---------|---------|
+| **asset_manager** | 添加 `is_overwrite` 参数 | 接口变更，需同步修改调用处 |
+| **storage_module** | 返回 `save_result_t` 枚举 | 封装层适配新接口 |
+| **main** | 添加匹配判断和覆盖提示 | 用户界面增强 |
+| **cmd_handler** | 添加动态重试逻辑 | 提升系统鲁棒性 |
+
+### ⚠️ 注意事项
+
+1. **数据不可恢复**：覆盖操作会永久删除旧的特征向量
+2. **阈值可调**：可根据实际应用场景调整 `MATCH_THRESHOLD` 参数
+3. **初始化时机**：开机初始化失败不影响系统启动，但首次使用存储功能时会重试
+
+---
+
+**文档版本**: v2.3  
 **最后更新**: 2026-04-25  
 **作者**: ESP32-S3 CAM AI Team

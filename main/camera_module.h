@@ -17,4 +17,9 @@ bool camera_module_init(void);
  */
 bool camera_module_capture_and_process(float *feature_out, int feature_size);
 
+/**
+ * @brief 反初始化摄像头硬件（关闭摄像头）
+ */
+void camera_module_deinit(void);
+
 #endif // CAMERA_MODULE_H

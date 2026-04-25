@@ -1,4 +1,4 @@
-# ESP32-S3 CAM AI 快速参考卡
+# ESP32-S3 CAM AI 快速参考卡 v2.3.0
 
 ## 📌 常用命令速查
 
@@ -8,40 +8,48 @@ AA:BB:CC:DD:EE:FF    # 输入MAC地址（必须先输入才能使用摄像头）
 r                    # 重置系统，重新输入MAC
 ```
 
-### 💾 存储模式切换
-```
-storage sd           # 切换到SD卡存储模式
-storage flash        # 切换到内部Flash（SPIFFS）模式（**默认**）
-storage status       # 查看当前存储模式
-```
-
-**注意**：系统默认使用 SPIFFS（内部Flash）存储，无需外部 SD 卡即可正常使用。
+**注意**：系统在启动时自动初始化TF卡，无需手动切换存储模式。
 
 ### 📷 资产注册（三视图拍摄）
 ```
 f                    # 拍摄正面视图 (Front)
 s                    # 拍摄侧面视图 (Side)
-t                    # 拍摄顶部视图 (Top)
+t                    # 拍摄顶部视图并保存 (Top)
 ```
 **顺序要求：** f → s → t（必须按此顺序）
 
-### 🔍 资产盘点
+**覆盖提示**：
+- 首次注册：`Asset saved to SD card successfully.`
+- 覆盖更新：`Asset UPDATED (overwritten) on SD card.`
+
+### 🔍 智能盘点（引导式）
 ```
-c                    # 进入盘点模式
-1                    # 比对正面视图
-2                    # 比对侧面视图
-3                    # 比对顶部视图
+c                    # 进入盘点模式（自动引导拍摄三视图）
 ```
 
-### 📡 WiFi控制
+**盘点结果示例**：
 ```
-wifi on              # 开启视频流
-wifi off             # 关闭视频流（默认状态）
+========== INVENTORY RESULT ==========
+  Front: 92.56 (×0.5)
+  Side:  89.29 (×0.3)
+  Top:   95.12 (×0.2)
+  ----------------------------------------
+  Weighted Confidence: 91.8745
+  Threshold: 0.75
+  ✅ MATCH - Same Asset
+  MAC: AA:BB:CC:DD:EE:FF
+========================================
 ```
+
+**匹配判断**：
+- ✅ **置信度 ≥ 0.75** → 确认为同一物品
+- ❌ **置信度 < 0.75** → 不是同一物品
 
 ### 📋 其他功能
 ```
-l                    # 列出所有已注册资产
+l                    # 列出所有已注册资产 + TF卡空间统计
+i                    # 查看系统信息（堆内存、SDK版本等）
+help / ?             # 显示帮助信息
 ```
 
 ---
@@ -50,40 +58,51 @@ l                    # 列出所有已注册资产
 
 ### 场景1：注册新资产
 ```
-1. AA:BB:CC:DD:EE:FF     ← 输入MAC地址
-   （等待系统初始化SD卡和摄像头）
+1. r                     ← 选择注册模式
+   （系统显示主菜单后输入）
 
-2. f                     ← 拍摄正面
+2. AA:BB:CC:DD:EE:FF     ← 输入MAC地址
+   （系统自动初始化TF卡和摄像头）
+
+3. f                     ← 拍摄正面
    （将物品正面对准摄像头）
 
-3. s                     ← 拍摄侧面
+4. s                     ← 拍摄侧面
    （将物品旋转90度）
 
-4. t                     ← 拍摄顶部
-   （从上往下拍摄）
+5. t                     ← 拍摄顶部并保存
    
-✅ 完成！资产已保存到SD卡
+✅ 完成！资产已保存到TF卡
+   首次注册：Asset saved to SD card successfully.
+   覆盖更新：Asset UPDATED (overwritten) on SD card.
 ```
 
-### 场景2：盘点资产
+### 场景2：智能盘点（推荐）⭐
 ```
-1. AA:BB:CC:DD:EE:FF     ← 输入要盘点的MAC地址
+1. c                     ← 选择盘点模式
+   （系统显示主菜单后输入）
 
-2. c                     ← 进入盘点模式
+2. AA:BB:CC:DD:EE:FF     ← 输入要盘点的MAC地址
 
-3. 1                     ← 比对正面
-   显示: FRONT similarity: 0.9234 [MATCH]
+3. 系统自动引导：
+   [STEP 1/3] Please capture FRONT view
+              Send 'f' to capture
+   
+   [STEP 2/3] Please capture SIDE view
+              Send 's' to capture
+   
+   [STEP 3/3] Please capture TOP view
+              Send 't' to capture and analyze
 
-4. 2                     ← 比对侧面
-   显示: SIDE similarity: 0.8876 [MATCH]
+4. 自动输出分析报告：
+   Weighted Confidence: 91.8745
+   Threshold: 0.75
+   ✅ MATCH - Same Asset
 
-5. 3                     ← 比对顶部
-   显示: TOP similarity: 0.9012 [MATCH]
-
-✅ 三个视角都匹配，确认是同一物品
+✅ 完成！系统自动判断是否为同一物品
 ```
 
-### 场景3：查看已注册资产
+### 场景3：查看已注册资产和存储空间
 ```
 l                        ← 列出所有资产
 
@@ -92,17 +111,14 @@ l                        ← 列出所有资产
   [1] MAC: AA:BB:CC:DD:EE:FF
   [2] MAC: 11:22:33:44:55:66
 Total: 2 assets
+
+=== Storage Statistics ===
+  Total Space: 7.5 GB
+  Used Space:  150 KB
+  Free Space:  7.5 GB
+  Usage:       0.00%
+  Status:      ✓ Healthy
 ========================
-```
-
-### 场景4：开启WiFi视频流
-```
-wifi on                  ← 开启视频流
-
-浏览器访问: http://192.168.4.1/
-WiFi密码: 12345678
-
-wifi off                 ← 使用完毕后关闭
 ```
 
 ---
@@ -120,16 +136,17 @@ wifi off                 ← 使用完毕后关闭
 - 🎯 物品居中
 - 🖼️ 背景简洁
 
-### 状态提示
-- `[MATCH]` - 相似度 ≥ 0.85，匹配成功
-- `[NO MATCH]` - 相似度 < 0.85，不匹配
+### 匹配判断说明
+- **阈值**: 0.75（加权置信度）
+- **权重分配**: 正面50%, 侧面30%, 顶部20%
+- **可调参数**: 修改代码中的 `MATCH_THRESHOLD` 常量
 
 ### 常见错误
 ```
 "Invalid MAC format"        → 检查MAC地址格式
 "Please capture FRONT view first"  → 必须按顺序拍摄
-"Registration not complete" → 必须完成三视图才能盘点
-"SD card init FAILED"      → 检查SD卡是否正确插入
+"Storage initialization failed"    → 检查TF卡是否正确插入
+"SD card is FULL"                  → 清理部分资产或更换更大容量TF卡
 ```
 
 ---
@@ -139,29 +156,22 @@ wifi off                 ← 使用完毕后关闭
 | 问题 | 解决方法 |
 |------|----------|
 | 摄像头不启动 | 先输入有效的MAC地址 |
-| SD卡初始化失败 | 检查SD卡是否插入，格式是否为FAT32 |
+| TF卡初始化失败 | 检查TF卡是否插入，格式是否为FAT32 |
 | 相似度始终很低 | 检查光照和拍摄角度是否一致 |
 | 系统重启 | MobileNetV2推理耗时较长属正常现象 |
-| WiFi无法连接 | 确认SSID和密码正确，最多4个客户端 |
+| TF卡空间不足 | 使用 `l` 查看后删除部分资产，或更换更大容量TF卡 |
 
 ---
 
 ## 📊 性能指标
 
-- **MobileNetV2推理**: ~1.3秒/次
-- **三视图注册总耗时**: ~4-5秒
-- **单次盘点比对**: ~1.3秒
+- **MobileNetV2推理**: ~2.5秒/次
+- **三视图注册总耗时**: ~8-10秒
+- **完整盘点流程**: ~10秒（含三视图采集+分析）
 - **每个资产存储**: ~15KB
-- **相似度阈值**: 0.85（可调整）
-
----
-
-## 🌐 WiFi配置
-
-- **SSID**: `ESP32_CAM`
-- **密码**: `12345678`
-- **IP地址**: `192.168.4.1`
-- **最大连接数**: 4
+- **匹配阈值**: 0.75（可调整）
+- **TF卡写入速度**: ~500KB/s
+- **8GB卡容量**: 约50万个资产（理论最大值）
 
 ---
 
@@ -169,11 +179,17 @@ wifi off                 ← 使用完毕后关闭
 
 ```
 /sdcard/assets/
-├── AA_BB_CC_DD_EE_FF.dat    # 资产特征数据
+├── AA_BB_CC_DD_EE_FF.dat    # 资产特征数据（三个1280维向量）
 └── ...
 ```
 
+**单文件大小**: ~15KB  
+**文件名格式**: MAC地址中的 `:` 替换为 `_`，后缀 `.dat`
+
 ---
 
-**详细文档**: [USER_GUIDE.md](USER_GUIDE.md)  
-**实现总结**: [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md)
+**详细文档**: [README.md](README.md) | [USER_GUIDE.md](USER_GUIDE.md)  
+**快速入门**: [QUICKSTART.md](QUICKSTART.md)  
+**技术实现**: [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md)
+
+**版本**: v2.3.0 (2026-04-25)

@@ -36,9 +36,10 @@ esp_err_t asset_manager_init(void);
 /**
  * @brief 保存资产记录到当前存储介质
  * @param record 资产记录指针
+ * @param is_overwrite 输出参数，是否为覆盖操作（可为NULL）
  * @return ESP_OK表示成功
  */
-esp_err_t asset_save(const asset_record_t *record);
+esp_err_t asset_save(const asset_record_t *record, bool *is_overwrite);
 
 /**
  * @brief 从当前存储介质加载资产记录
@@ -96,6 +97,11 @@ esp_err_t asset_check_write_space(size_t required_bytes, uint8_t warning_thresho
  * @brief 反初始化管理器（卸载存储）
  */
 void asset_manager_deinit(void);
+
+/**
+ * @brief 通过UART列出所有资产（用于cmd_handler）
+ */
+void asset_list_uart(void);
 
 #ifdef __cplusplus
 }

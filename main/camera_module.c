@@ -81,3 +81,17 @@ bool camera_module_capture_and_process(float *feature_out, int feature_size) {
     // 直接调用 mobilenet_wrapper 提供的接口
     return mobilenet_extract_features(feature_out, feature_size);
 }
+
+void camera_module_deinit(void) {
+    if (!g_is_initialized) {
+        return;
+    }
+    
+    esp_err_t err = esp_camera_deinit();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Camera deinit failed with error 0x%x", err);
+    } else {
+        g_is_initialized = false;
+        ESP_LOGI(TAG, "Camera deinitialized successfully");
+    }
+}

@@ -20,13 +20,19 @@ bool storage_module_init(void) {
     return false;
 }
 
-bool storage_module_save_asset(const asset_record_t *record) {
-    if (!g_is_initialized) return false;
+save_result_t storage_module_save_asset(const asset_record_t *record) {
+    if (!g_is_initialized) return SAVE_RESULT_FAILED;
     
     // 增加延迟和看门狗复位，确保稳定性
     vTaskDelay(pdMS_TO_TICKS(50));
     esp_task_wdt_reset();
     
-    esp_err_t ret = asset_save(record);
-    return (ret == ESP_OK);
+    bool is_overwrite = false;
+    esp_err_t ret = asset_save(record, &is_overwrite);
+    
+    if (ret != ESP_OK) {
+        return SAVE_RESULT_FAILED;
+    }
+    
+    return is_overwrite ? SAVE_RESULT_SUCCESS_OVERWRITE : SAVE_RESULT_SUCCESS_NEW;
 }

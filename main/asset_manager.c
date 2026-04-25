@@ -4,6 +4,7 @@
 #include "sdmmc_cmd.h"
 #include "driver/sdmmc_host.h"
 #include "driver/sdmmc_defs.h"
+#include "driver/uart.h"  // 新增：用于UART输出
 #include "esp_task_wdt.h"  // 看门狗复位函数
 #include "ff.h"  // FATFS头文件，提供SS()宏和FATFS结构体定义
 #include <stdio.h>
@@ -147,25 +148,21 @@ static void get_asset_file_path(const char *mac_address, char *path, size_t path
     char asset_dir[64];
     get_current_asset_dir(asset_dir, sizeof(asset_dir));
 
-    // 【修复】使用MAC地址生成简短且唯一的文件名
-    // 方案: 提取MAC中的数字部分，生成8字符以内的文件名
-    // 例如: AA:BB:CC:DD:EE:FF -> A0B1C2 (取每段的第一个字符)
-    char short_name[9];  // 最多8个字符 + '\0'
-    int name_idx = 0;
+    // ✅ 修复：将MAC地址中的':'替换为'_'作为文件名（符合FATFS 8.3格式限制）
+    // 例如: AA:BB:CC:DD:EE:FF -> AA_BB_CC_DD_EE_FF.dat
+    char safe_mac[MAC_ADDR_LEN + 1];
+    strncpy(safe_mac, mac_address, MAC_ADDR_LEN);
+    safe_mac[MAC_ADDR_LEN] = '\0';
     
-    // 遍历MAC地址，提取字母和数字，跳过冒号
-    for (int i = 0; mac_address[i] != '\0' && name_idx < 8; i++) {
-        char c = mac_address[i];
-        if (c != ':') {
-            short_name[name_idx++] = c;
+    for (int i = 0; i < strlen(safe_mac); i++) {
+        if (safe_mac[i] == ':') {
+            safe_mac[i] = '_';
         }
     }
-    short_name[name_idx] = '\0';
     
-    snprintf(path, path_size, "%s/%s.%s", asset_dir, short_name, extension);
+    snprintf(path, path_size, "%s/%s.%s", asset_dir, safe_mac, extension);
     
-    ESP_LOGI(TAG, "Generated filename: %s (len=%d) from MAC: %s", 
-             short_name, strlen(short_name), mac_address);
+    ESP_LOGI(TAG, "Generated filename: %s from MAC: %s", safe_mac, mac_address);
 }
 
 /**
@@ -188,8 +185,11 @@ esp_err_t asset_manager_init(void)
 
 /**
  * @brief 保存资产记录到当前存储介质
+ * @param record 资产记录指针
+ * @param is_overwrite 输出参数，是否为覆盖操作（可为NULL）
+ * @return ESP_OK表示成功
  */
-esp_err_t asset_save(const asset_record_t *record)
+esp_err_t asset_save(const asset_record_t *record, bool *is_overwrite)
 {
     if (!g_storage_initialized) {
         ESP_LOGE(TAG, "Storage not initialized");
@@ -204,7 +204,26 @@ esp_err_t asset_save(const asset_record_t *record)
     char file_path[128];
     get_asset_file_path(record->mac_address, file_path, sizeof(file_path), "dat");
 
+    // ✅ 检查文件是否已存在，判断是否为覆盖操作
+    struct stat check_st;
+    bool overwrite = (stat(file_path, &check_st) == 0);
+    
+    if (is_overwrite != NULL) {
+        *is_overwrite = overwrite;
+    }
+    
+    if (overwrite) {
+        ESP_LOGW(TAG, "Asset already exists for MAC: %s, will overwrite", record->mac_address);
+    } else {
+        ESP_LOGI(TAG, "Creating new asset for MAC: %s", record->mac_address);
+    }
+    
     ESP_LOGI(TAG, "Saving asset to: %s", file_path);
+
+    // ✅ 关键修复：AI推理后给硬件控制器足够的恢复时间
+    // 防止PSRAM DMA竞争导致SD卡通信超时
+    esp_task_wdt_reset();
+    vTaskDelay(pdMS_TO_TICKS(300));  // 增加延迟到300ms
 
     // 【新增】写入前检查SD卡剩余空间
     esp_err_t space_check = asset_check_write_space(sizeof(asset_record_t), 10);
@@ -240,72 +259,27 @@ esp_err_t asset_save(const asset_record_t *record)
         ESP_LOGI(TAG, "Directory already exists");
     }
 
-    // 【调试】验证文件是否可以创建
-    ESP_LOGI(TAG, "Attempting to open file: %s", file_path);
-    ESP_LOGI(TAG, "File path length: %d bytes", strlen(file_path));
-    
-    // 【临时测试】尝试使用短文件名
-    char test_path[128];
-    snprintf(test_path, sizeof(test_path), "/sdcard/assets/test.dat");
-    ESP_LOGI(TAG, "Testing with short filename: %s", test_path);
-    
-    FILE *f_test = fopen(test_path, "wb");
-    if (f_test) {
-        ESP_LOGI(TAG, "Short filename test PASSED!");
-        fclose(f_test);
-        f_unlink(test_path);  // 删除测试文件
-    } else {
-        ESP_LOGE(TAG, "Short filename test FAILED (errno=%d)", errno);
-    }
-    
+    // ✅ 移除临时测试代码，减少不必要的IO操作
     FILE *f = fopen(file_path, "wb");
     if (!f) {
         ESP_LOGE(TAG, "Failed to open file for writing: %s", file_path);
         ESP_LOGE(TAG, "Error code: %d - %s", errno, strerror(errno));
         
         // 常见错误诊断
-        switch (errno) {
-            case ENOENT:
-                ESP_LOGE(TAG, "Directory does not exist or path is invalid");
-                break;
-            case EACCES:
-                ESP_LOGE(TAG, "Permission denied or SD card is write-protected");
-                break;
-            case ENOSPC:
-                ESP_LOGE(TAG, "SD card is full");
-                break;
-            case EMFILE:
-                ESP_LOGE(TAG, "Too many open files");
-                break;
-            case EINVAL:
-                ESP_LOGE(TAG, "Invalid argument - possible path format issue");
-                ESP_LOGE(TAG, "Path length: %d", strlen(file_path));
-                // 检查路径是否包含非法字符
-                ESP_LOGI(TAG, "Path characters check:");
-                for (int i = 0; i < strlen(file_path); i++) {
-                    unsigned char c = file_path[i];
-                    if (c < 0x20 || c > 0x7E) {
-                        ESP_LOGE(TAG, "  Invalid character at position %d: 0x%02X ('%c')", i, c, c);
-                    }
-                }
-                // FATFS不允许的字符: < > : " / \ | ? *
-                const char *invalid_chars = "<>:\"/\\|?*";
-                for (int i = 0; i < strlen(file_path); i++) {
-                    if (strchr(invalid_chars, file_path[i])) {
-                        ESP_LOGE(TAG, "  FATFS invalid character '%c' at position %d", file_path[i], i);
-                    }
-                }
-                break;
-            default:
-                ESP_LOGE(TAG, "Unknown error");
-                break;
+        if (errno == ENOSPC) {
+            ESP_LOGE(TAG, "SD card is FULL! Please free up space.");
+        } else if (errno == EACCES) {
+            ESP_LOGE(TAG, "Permission denied. Check SD card write protection.");
+        } else if (errno == EIO) {
+            ESP_LOGE(TAG, "IO error. SD card may be corrupted or disconnected.");
         }
+        
         return ESP_FAIL;
     }
 
-    // 【关键修复】直接写入传入的record指针,避免在栈上创建副本
-    // 原代码: fwrite(record, sizeof(asset_record_t), 1, f) 是正确的
-    // 但调用方在栈上创建了15KB的临时变量,导致栈溢出风险
+    ESP_LOGI(TAG, "File opened successfully, path length: %d bytes", strlen(file_path));
+
+    // 写入资产记录
     size_t written = fwrite(record, sizeof(asset_record_t), 1, f);
     fclose(f);
 
@@ -314,7 +288,8 @@ esp_err_t asset_save(const asset_record_t *record)
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "Asset saved successfully for MAC: %s", record->mac_address);
+    ESP_LOGI(TAG, "Asset saved successfully for MAC: %s (%s)", 
+             record->mac_address, overwrite ? "OVERWRITE" : "NEW");
     return ESP_OK;
 }
 
@@ -618,4 +593,98 @@ void asset_manager_deinit(void)
     }
     
     g_storage_initialized = false;
+}
+
+/**
+ * @brief 通过UART列出所有资产（用于cmd_handler）
+ */
+void asset_list_uart(void)
+{
+    if (!g_storage_initialized) {
+        ESP_LOGE(TAG, "Storage not initialized");
+        uart_write_bytes(UART_NUM_0, "\r\n[ASSET LIST]\r\n", 15);
+        uart_write_bytes(UART_NUM_0, "Failed to list assets or storage not initialized.\r\n", 52);
+        return;
+    }
+
+    int count = 0;
+    esp_err_t ret = asset_list_all(&count);
+    
+    if (ret != ESP_OK) {
+        uart_write_bytes(UART_NUM_0, "\r\n[ASSET LIST]\r\n", 15);
+        uart_write_bytes(UART_NUM_0, "Failed to list assets.\r\n", 25);
+        return;
+    }
+
+    // 显示存储空间信息
+    uint64_t total_bytes, used_bytes, free_bytes;
+    ret = asset_get_storage_info(&total_bytes, &used_bytes, &free_bytes);
+    if (ret == ESP_OK) {
+        char info_buf[256];
+        float total_mb = (float)total_bytes / (1024.0f * 1024.0f);
+        float used_mb = (float)used_bytes / (1024.0f * 1024.0f);
+        float free_mb = (float)free_bytes / (1024.0f * 1024.0f);
+        float usage_percent = ((float)used_bytes / (float)total_bytes) * 100.0f;
+        
+        snprintf(info_buf, sizeof(info_buf),
+                 "\r\n[ASSET LIST]\r\n\r\n"
+                 "=== Storage Information ===\r\n"
+                 "  Total: %.2f MB\r\n"
+                 "  Used:  %.2f MB (%.1f%%)\r\n"
+                 "  Free:  %.2f MB (%.1f%%)\r\n"
+                 "===========================\r\n\r\n",
+                 total_mb, used_mb, usage_percent, free_mb, 100.0f - usage_percent);
+        uart_write_bytes(UART_NUM_0, info_buf, strlen(info_buf));
+    }
+
+    // 列出资产
+    char list_buf[512];
+    snprintf(list_buf, sizeof(list_buf), "=== Registered Assets (SD Card) ===\r\n");
+    uart_write_bytes(UART_NUM_0, list_buf, strlen(list_buf));
+
+    // 重新读取目录以列出文件
+    char asset_dir[64];
+    get_current_asset_dir(asset_dir, sizeof(asset_dir));
+
+    DIR *dir = opendir(asset_dir);
+    if (!dir) {
+        uart_write_bytes(UART_NUM_0, "Failed to open assets directory.\r\n", 35);
+        return;
+    }
+
+    struct dirent *entry;
+    int index = 1;
+    while ((entry = readdir(dir)) != NULL) {
+        // 跳过 "." 和 ".."
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        // 只显示.bin文件
+        const char *ext = strrchr(entry->d_name, '.');
+        if (ext && strcmp(ext, ".bin") == 0) {
+            // 提取MAC地址（文件名格式: XX_XX_XX_XX_XX_XX.bin）
+            char mac_display[32];
+            strncpy(mac_display, entry->d_name, sizeof(mac_display) - 1);
+            mac_display[sizeof(mac_display) - 1] = '\0';
+            
+            // 将下划线替换为冒号
+            for (int i = 0; mac_display[i] != '\0' && mac_display[i] != '.'; i++) {
+                if (mac_display[i] == '_') {
+                    mac_display[i] = ':';
+                }
+            }
+            
+            char item_buf[64];
+            snprintf(item_buf, sizeof(item_buf), "  [%d] MAC: %s\r\n", index++, mac_display);
+            uart_write_bytes(UART_NUM_0, item_buf, strlen(item_buf));
+        }
+    }
+
+    closedir(dir);
+
+    char summary_buf[64];
+    snprintf(summary_buf, sizeof(summary_buf), 
+             "Total: %d assets\r\n========================\r\n", count);
+    uart_write_bytes(UART_NUM_0, summary_buf, strlen(summary_buf));
 }
