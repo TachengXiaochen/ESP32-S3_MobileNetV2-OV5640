@@ -6,12 +6,13 @@
 
 ---
 
-## 🆕 最新功能更新（2026-04-23）
+## 🆕 最新功能更新（2026-04-25）
 
-### ✨ 智能盘点模式（新增）
+### ✨ 智能盘点模式（引导式）
 
-#### 三视图加权综合判断
-- **自动采集**：输入 `c` 指令后自动完成正面、侧面、顶部三次拍摄
+#### 分步引导采集流程
+- **顺序引导拍摄**：输入 `c` 指令后进入盘点模式，系统按固定顺序引导用户拍摄
+- **步骤锁定机制**：必须按 正面→侧面→顶部 的顺序拍摄，防止误操作
 - **置信度分析**：实时计算每个视图的特征向量 L2 范数作为置信度指标
 - **加权融合算法**：
   - 正面视图权重：50%
@@ -27,38 +28,52 @@ AA:BB:CC:DD:EE:FF
 # 2. 启动盘点模式
 c
 
-# 3. 系统自动输出分析报告
-[RESULT] Weighted Confidence: 91.8745
-[RESULT] Inventory completed for MAC: AA:BB:CC:DD:EE:FF
+# 3. 系统引导拍摄流程
+[STEP 1/3] Please capture FRONT view
+         Send 'f' to capture
+         
+[STEP 2/3] Please capture SIDE view
+         Send 's' to capture
+         
+[STEP 3/3] Please capture TOP view
+         Send 't' to capture and analyze
+
+# 4. 自动输出分析报告
+========== INVENTORY RESULT ==========
+  Front: 92.56 (×0.5)
+  Side:  89.29 (×0.3)
+  Top:   95.12 (×0.2)
+  ----------------------------------------
+  Weighted Confidence: 91.8745
+  MAC: AA:BB:CC:DD:EE:FF
+========================================
 ```
 
 ---
 
-### 🔧 SD卡文件管理增强
+### 🔧 TF卡文件管理增强
 
-#### 新增功能
-1. **存储空间监控** - 实时查看SD卡总容量、已用空间、可用空间
-2. **写满预警系统** - 多级阈值警告（80%/90%/95%），防止数据丢失
-3. **资产删除功能** - 按MAC地址删除指定资产，释放存储空间
-4. **写入前检查** - 自动检测剩余空间，空间不足时拒绝写入
+#### 核心特性
+1. **TF卡存储（唯一模式）**：使用 MicroSD/TF 卡存储所有资产数据
+2. **存储空间监控**：实时查看TF卡总容量、已用空间、可用空间及使用率
+3. **写满预警系统**：多级阈值警告（80%/90%/95%），防止数据丢失
+4. **写入前检查**：自动检测剩余空间，空间不足时拒绝写入
+5. **资产列表查看**：列出所有已注册资产及存储统计信息
 
 #### 📋 串口命令速查
 
-| 命令 | 功能 | 示例 |
-|------|------|------|
-| `XX:XX:XX:XX:XX:XX` | 输入MAC地址初始化系统 | `AA:BB:CC:DD:EE:FF` |
-| `f` | 拍摄正面视图 | `f` |
-| `s` | 拍摄侧面视图 | `s` |
-| `t` | 拍摄顶部视图并保存 | `t` |
-| `c` | **启动智能盘点模式** | `c` |
-| `i` | 查看SD卡存储详情 | `i` |
-| `d XX:XX:XX:XX:XX:XX` | 删除指定资产 | `d AA:BB:CC:DD:EE:FF` |
-| `l` | 列出所有资产+存储统计 | `l` |
-| `storage sd` | 切换到SD卡模式 | `storage sd` |
-| `storage flash` | 切换到SPIFFS模式 | `storage flash` |
-| `storage status` | 查看当前存储模式 | `storage status` |
+| 命令 | 功能 | 示例 | 说明 |
+|------|------|------|------|
+| `XX:XX:XX:XX:XX:XX` | 输入MAC地址初始化 | `AA:BB:CC:DD:EE:FF` | 系统启动后首先输入 |
+| `f` / `F` | 拍摄正面视图 | `f` | 普通模式或盘点第1步 |
+| `s` / `S` | 拍摄侧面视图 | `s` | 普通模式或盘点第2步 |
+| `t` / `T` | 拍摄顶部视图并保存 | `t` | 普通模式自动保存，盘点第3步触发分析 |
+| `c` / `C` | **启动智能盘点模式** | `c` | 进入引导式三视图采集 |
+| `l` / `list` | 列出所有资产+存储统计 | `l` | 显示资产列表和空间信息 |
+| `i` / `info` | 查看系统信息 | `i` | 显示堆内存、SDK版本等 |
+| `help` / `?` | 显示帮助信息 | `help` | 查看所有可用命令 |
 
-#### 🔔 预警级别
+#### 🔔 存储预警级别
 - **>95%** ⚠️ CRITICAL - 几乎已满，需立即清理
 - **>90%** ⚠️ WARNING - 空间紧张，建议清理  
 - **>80%** ⚡ NOTICE - 使用率偏高，注意监控
@@ -78,8 +93,9 @@ c
 │ (Core 1) │ (Core 1) │ (Core 0)          │
 ├──────────┼──────────┼───────────────────┤
 │• 命令解析 │• 摄像头   │• SD卡/FATFS       │
-│• 队列发送 │• MobileNet│• 资产管理         │
-│• 状态监控 │• 特征提取 │• 文件IO           │
+│• 状态管理 │• MobileNet│• SPIFFS管理      │
+│• 队列发送 │• 特征提取 │• 资产管理         │
+│• 引导逻辑 │• 置信度计算│• 文件IO          │
 └──────────┴──────────┴───────────────────┘
          ↓         ↓         ↓
     ┌─────────────────────────────┐
@@ -89,13 +105,18 @@ c
 
 ### 核心模块
 
-| 模块 | 文件 | 职责 |
-|------|------|------|
-| **摄像头模块** | [camera_module.c/h](file://d:\Users\TcXc\Desktop\Program_ESP32-S3CAM\CAM_AI\main\camera_module.c) | OV5640初始化、图像采集 |
-| **AI推理模块** | [ai_module.c/h](file://d:\Users\TcXc\Desktop\Program_ESP32-S3CAM\CAM_AI\main\ai_module.c), [mobilenet_wrapper.cpp/h](file://d:\Users\TcXc\Desktop\Program_ESP32-S3CAM\CAM_AI\main\mobilenet_wrapper.cpp) | MobileNetV2模型加载、特征提取 |
-| **存储模块** | [storage_module.c/h](file://d:\Users\TcXc\Desktop\Program_ESP32-S3CAM\CAM_AI\main\storage_module.c) | SD卡挂载、文件系统管理 |
-| **资产管理** | [asset_manager.c/h](file://d:\Users\TcXc\Desktop\Program_ESP32-S3CAM\CAM_AI\main\asset_manager.c) | 资产记录、文件读写、空间监控 |
-| **主控制器** | [main.c](file://d:\Users\TcXc\Desktop\Program_ESP32-S3CAM\CAM_AI\main\main.c) | 任务调度、UART交互、状态管理 |
+| 模块 | 文件 | 职责 | 运行核心 |
+|------|------|------|----------|
+| **摄像头模块** | [camera_module.c/h](main/camera_module.c) | OV5640初始化、图像采集 | Core 1 |
+| **AI推理模块** | [ai_module.c/h](main/ai_module.c), [mobilenet_wrapper.cpp/h](main/mobilenet_wrapper.cpp) | MobileNetV2加载、特征提取 | Core 1 |
+| **存储模块** | [storage_module.c/h](main/storage_module.c) | TF卡初始化、资产保存 | Core 0 |
+| **资产管理** | [asset_manager.c/h](main/asset_manager.c) | 资产记录、文件读写、空间监控 | Core 0 |
+| **主控制器** | [main.c](main/main.c) | 任务调度、UART交互、盘点引导 | - |
+
+### 任务优先级
+- **Storage Task**: Priority 5（最高，确保文件IO稳定）
+- **Camera/AI Task**: Priority 4（中等，处理图像推理）
+- **UART Task**: Priority 3（最低，响应用户输入）
 
 ---
 
@@ -104,8 +125,10 @@ c
 ### 硬件准备
 - ✅ ESP32-S3开发板（带PSRAM，推荐8MB）
 - ✅ OV5640摄像头模块
-- ✅ MicroSD卡（FAT32格式，建议≥8GB）
+- ✅ **MicroSD/TF卡（必需，FAT32格式，建议≥8GB）**
 - ✅ USB数据线
+
+**重要提示**：系统仅支持 TF卡（MicroSD卡）存储，使用前请确保已插入格式化的 TF卡。
 
 ### 环境要求
 - **ESP-IDF**: v5.3.5 或更高版本
@@ -130,26 +153,30 @@ idf.py flash monitor -p COM3
 
 ### 首次使用流程
 
-1. **系统启动**：看到 `=== ESP32-CAM AI System Ready ===` 提示
-2. **输入MAC地址**：格式必须为 `XX:XX:XX:XX:XX:XX`（如 `AA:BB:CC:DD:EE:FF`）
-3. **等待初始化**：系统自动加载模型、初始化摄像头和SD卡
-4. **开始操作**：
-   - 单视图拍摄：输入 `f` / `s` / `t`
-   - 智能盘点：输入 `c`
-   - 查看存储：输入 `i`
+1. **插入TF卡**：确保 MicroSD/TF 卡已正确插入卡槽（FAT32格式）
+2. **系统启动**：看到 `=== ESP32-CAM AI System Ready ===` 提示
+3. **输入MAC地址**：格式必须为 `XX:XX:XX:XX:XX:XX`（如 `AA:BB:CC:DD:EE:FF`）
+4. **等待初始化**：系统自动加载模型、初始化摄像头和TF卡
+5. **开始操作**：
+   - 单视图拍摄：输入 `f` / `s` / `t`（顶部视图会自动保存）
+   - 智能盘点：输入 `c`（引导式三视图采集+分析）
+   - 查看存储：输入 `i` 或 `l`
+   - 查看帮助：输入 `help`
 
 ---
 
 ## 📊 性能指标
 
-| 指标 | 数值 |
-|------|------|
-| **特征向量维度** | 1280 (MobileNetV2) |
-| **单次推理时间** | ~2.5秒 |
-| **盘点完整流程** | ~10秒（三视图） |
-| **内存占用** | ~4MB (PSRAM) |
-| **识别准确率** | >90%（三视图加权） |
-| **SD卡写入速度** | ~500KB/s |
+| 指标 | 数值 | 备注 |
+|------|------|------|
+| **特征向量维度** | 1280 | MobileNetV2输出 |
+| **单次推理时间** | ~2.5秒 | 包含图像采集+预处理 |
+| **盘点完整流程** | ~10秒 | 三视图采集+加权分析 |
+| **内存占用** | ~4MB | PSRAM用于模型和中间结果 |
+| **识别准确率** | >90% | 三视图加权综合判断 |
+| **TF卡写入速度** | ~500KB/s | 取决于TF卡等级 |
+| **单资产大小** | ~15KB | 包含三个1280维特征向量 |
+| **8GB卡容量** | 约50万个资产 | 理论最大值 |
 
 ---
 
@@ -157,11 +184,16 @@ idf.py flash monitor -p COM3
 
 ### 调整盘点权重
 
-编辑 [main.c](file://d:\Users\TcXc\Desktop\Program_ESP32-S3CAM\CAM_AI\main\main.c) 中的权重数组：
+编辑 [main.c](main/main.c) 中的权重数组：
 
 ```c
 const float weights[3] = {0.5f, 0.3f, 0.2f}; // 正面、侧面、顶部
 ```
+
+**权重调整建议**：
+- 如果正面特征最稳定：保持 `{0.5, 0.3, 0.2}`
+- 如果顶部视角更清晰：调整为 `{0.4, 0.2, 0.4}`
+- 如果三个视角同等重要：调整为 `{0.33, 0.33, 0.34}`
 
 ### PSRAM频率优化
 
@@ -172,14 +204,28 @@ Component config → ESP PSRAM → SPI RAM speed → 40MHz
 
 ### 摄像头引脚配置
 
-根据实际硬件修改 [camera_module.c](file://d:\Users\TcXc\Desktop\Program_ESP32-S3CAM\CAM_AI\main\camera_module.c) 中的宏定义：
+根据实际硬件修改 [camera_module.c](main/camera_module.c) 中的宏定义：
 
 ```c
 #define CAMERA_PIN_XCLK 15
 #define CAMERA_PIN_SIOD 4
 #define CAMERA_PIN_SIOC 5
-// ... 其他引脚
+#define CAMERA_PIN_D7 16
+#define CAMERA_PIN_D6 17
+// ... 其他引脚根据实际接线调整
 ```
+
+### TF卡引脚配置
+
+根据实际硬件修改 [asset_manager.c](main/asset_manager.c) 中的宏定义：
+
+```c
+#define SD_PIN_CLK  39
+#define SD_PIN_CMD  38
+#define SD_PIN_D0   40
+```
+
+**注意**：ESP32-S3的高编号GPIO需要更强的驱动能力，代码中已设置为 `GPIO_DRIVE_CAP_3`。
 
 ---
 
@@ -187,16 +233,81 @@ Component config → ESP PSRAM → SPI RAM speed → 40MHz
 
 ### 常见问题
 
-| 问题 | 解决方案 |
-|------|----------|
-| **编译失败** | 执行 `idf.py fullclean` 后重新编译 |
-| **MAC地址无响应** | 确认波特率115200，勾选"发送新行" |
-| **摄像头初始化失败** | 检查接线，确认OV5640型号 |
-| **SD卡挂载失败** | 确认FAT32格式，检查GPIO 39/38/40 |
-| **LoadProhibited崩溃** | 降低PSRAM频率至40MHz |
-| **看门狗重启** | 已修复，确保更新至最新版本 |
+| 问题 | 可能原因 | 解决方案 |
+|------|----------|----------|
+| **编译失败** | 缓存冲突 | 执行 `idf.py fullclean` 后重新编译 |
+| **MAC地址无响应** | 波特率错误或未勾选新行 | 确认波特率115200，勾选"发送新行" |
+| **摄像头初始化失败** | 接线错误或型号不匹配 | 检查排线连接，确认OV5640型号，验证引脚配置 |
+| **TF卡挂载失败** | 未插卡、格式错误或引脚错误 | **确认已插入TF卡**，确认FAT32格式，检查GPIO 39/38/40，尝试降低时钟频率至10MHz |
+| **LoadProhibited崩溃** | PSRAM频率过高 | 降低PSRAM频率至40MHz |
+| **看门狗重启** | 长耗时操作未喂狗 | 已修复，确保更新至最新版本 |
+| **TF卡空间不足** | 资产数量过多 | 使用 `l` 查看后手动删除部分资产文件，或更换更大容量TF卡 |
+| **特征提取失败** | 光照不足或摄像头故障 | 改善光照条件，检查摄像头是否正常工作 |
+
+### TF卡相关故障
+
+**问题1：TF卡初始化失败**
+```
+错误信息：Failed to mount SD card (0x...)
+解决步骤：
+1. 确认TF卡已正确插入卡槽
+2. 检查TF卡是否为FAT32格式（可在电脑上格式化）
+3. 尝试更换TF卡（某些卡可能不兼容）
+4. 检查引脚连接是否正确（CLK=39, CMD=38, D0=40）
+5. 查看串口日志中的具体错误代码
+```
+
+**问题2：TF卡写入失败**
+```
+错误信息：Failed to open file for writing
+解决步骤：
+1. 检查TF卡是否写保护（某些卡有物理开关）
+2. 确认TF卡未满（使用 `i` 命令查看空间）
+3. 检查assets目录是否存在
+4. 尝试重新格式化TF卡为FAT32
+```
+
+### 调试技巧
+
+1. **查看TF卡详细信息**：
+   ```bash
+   i  # 显示总容量、已用空间、可用空间和使用率
+   ```
+
+2. **列出所有资产**：
+   ```bash
+   l  # 显示已注册的MAC地址列表和资产数量
+   ```
+
+3. **检查系统资源**：
+   ```bash
+   i  # 显示空闲堆内存、最小空闲堆内存和SDK版本
+   ```
 
 详细排错指南请查看 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)
+
+---
+
+## 📁 文件存储结构
+
+### TF卡目录结构
+```
+/sdcard/
+└── assets/
+    ├── AABBCCDDEEFF.dat    # MAC为AA:BB:CC:DD:EE:FF的资产
+    ├── 112233445566.dat    # MAC为11:22:33:44:55:66的资产
+    └── ...
+```
+
+**文件名规则**：去除MAC地址中的冒号，直接使用12个字符（如 `AABBCCDDEEFF.dat`）
+
+**文件格式**：每个 `.dat` 文件包含：
+- MAC地址字符串（18字节）
+- 正面特征向量（1280×4=5120字节）
+- 侧面特征向量（1280×4=5120字节）
+- 顶部特征向量（1280×4=5120字节）
+- 有效性标志（1字节）
+- **总计**：约15,379字节/资产
 
 ---
 
@@ -222,5 +333,29 @@ Component config → ESP PSRAM → SPI RAM speed → 40MHz
 
 ---
 
-**最后更新时间**: 2026-04-23  
-**版本**: v2.0.0 (模块化重构 + 智能盘点)
+## 🔄 版本历史
+
+- **v2.2.0** (2026-04-25)
+  - **移除SPIFFS支持**：系统现在仅支持TF卡存储
+  - 移除 `storage sd/flash/status` 命令（无需切换）
+  - 优化存储管理：专注于TF卡空间监控和预警
+  - 完善帮助系统和命令提示
+
+- **v2.1.0** (2026-04-25)
+  - 移除WiFi视频流功能（简化系统架构）
+  - 优化盘点模式为引导式流程（f→s→t顺序锁定）
+  - 增强存储管理：添加空间监控和预警系统
+
+- **v2.0.0** (2026-04-23)
+  - 模块化重构：摄像头、AI、存储独立模块
+  - 实现三视图加权综合判断算法
+  - 支持SPIFFS和TF卡双存储模式
+
+- **v1.0.0** (2026-04-22)
+  - 初始版本：基础资产注册和比对功能
+
+---
+
+**最后更新时间**: 2026-04-25  
+**版本**: v2.2.0 (仅TF卡模式)  
+**维护者**: ESP32-S3 CAM AI Team

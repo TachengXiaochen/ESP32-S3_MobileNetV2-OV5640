@@ -20,7 +20,7 @@ idf.py --version
 基于 **ESP32-S3 + MobileNetV2** 的智能资产管理系统，支持：
 - ✅ **三视图加权盘点**（准确率 >90%）
 - ✅ **智能置信度分析**
-- ✅ **SD卡/SPIFFS双存储**
+- ✅ **TF卡存储**（唯一模式）
 - ✅ **模块化多任务架构**
 
 ---
@@ -31,8 +31,10 @@ idf.py --version
 |------|---------|------|
 | **开发板** | ESP32-S3（带PSRAM） | 推荐8MB PSRAM |
 | **摄像头** | OV5640模块 | 支持RGB565格式 |
-| **存储** | MicroSD卡（可选） | FAT32格式，建议≥8GB |
+| **存储** | **MicroSD/TF卡（必需）** | FAT32格式，建议≥8GB |
 | **数据线** | USB Type-C | 用于烧录和串口通信 |
+
+**重要提示**：系统仅支持 TF卡（MicroSD卡）存储，使用前请确保已插入格式化的 TF卡。
 
 ---
 
@@ -97,7 +99,7 @@ AA:BB:CC:DD:EE:FF
 ```
 
 等待系统自动完成：
-- ✅ SD卡挂载
+- ✅ TF卡挂载
 - ✅ 摄像头初始化
 - ✅ MobileNetV2模型加载
 
@@ -105,17 +107,28 @@ AA:BB:CC:DD:EE:FF
 
 #### 方式A：智能盘点（推荐）⭐
 ```bash
-c  # 一键完成三视图采集 + 加权分析
+c  # 进入引导式三视图采集 + 加权分析
 ```
 
 **预期输出**：
 ```
-[INVENTORY] Starting multi-view inventory mode...
-[INVENTORY] Capturing front view...
-[INVENTORY] Capturing side view...
-[INVENTORY] Capturing top view...
-[RESULT] Weighted Confidence: 91.8745
-[RESULT] Inventory completed for MAC: AA:BB:CC:DD:EE:FF
+[STEP 1/3] Please capture FRONT view
+         Send 'f' to capture
+
+[STEP 2/3] Please capture SIDE view
+         Send 's' to capture
+
+[STEP 3/3] Please capture TOP view
+         Send 't' to capture and analyze
+
+========== INVENTORY RESULT ==========
+  Front: 92.56 (×0.5)
+  Side:  89.29 (×0.3)
+  Top:   95.12 (×0.2)
+  ----------------------------------------
+  Weighted Confidence: 91.8745
+  MAC: AA:BB:CC:DD:EE:FF
+========================================
 ```
 
 #### 方式B：手动单视图拍摄
@@ -127,8 +140,9 @@ t  # 拍摄顶部并保存
 
 ### 4. 查看存储状态
 ```bash
-i  # 查看SD卡容量使用情况
+i  # 查看TF卡容量使用情况
 l  # 列出所有已注册资产
+help  # 查看所有可用命令
 ```
 
 ---
@@ -142,6 +156,7 @@ l  # 列出所有已注册资产
 | **特征向量维度** | 1280 (MobileNetV2) |
 | **识别准确率** | >90%（加权综合） |
 | **内存占用** | ~4MB (PSRAM) |
+| **TF卡写入速度** | ~500KB/s |
 
 ---
 
@@ -164,10 +179,12 @@ idf.py build
 - 检查GPIO接线（XCLK=15, SIOD=4, SIOC=5等）
 - 查看日志中的 `Camera PID` 是否为 `0x5640`
 
-### Q4: SD卡挂载失败？
-- 确认SD卡为 **FAT32** 格式
+### Q4: TF卡挂载失败？
+- **确认TF卡已正确插入卡槽**
+- 确认TF卡为 **FAT32** 格式
 - 检查GPIO 39/38/40 接线
-- 尝试更换SD卡（部分高速卡不兼容）
+- 尝试更换TF卡（部分高速卡不兼容）
+- 查看串口日志中的具体错误代码
 
 ### Q5: 出现LoadProhibited崩溃？
 在 `idf.py menuconfig` 中降低PSRAM频率：
