@@ -4,6 +4,8 @@
 #include "sdmmc_cmd.h"
 #include "driver/sdmmc_host.h"
 #include "driver/sdmmc_defs.h"
+#include "esp_task_wdt.h"  // 看门狗复位函数
+#include "ff.h"  // FATFS头文件，提供SS()宏和FATFS结构体定义
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -39,13 +41,6 @@ static esp_err_t init_sd_card(void)
 {
     ESP_LOGI(TAG, "Initializing SD card...");
 
-    // SD卡挂载配置
-    esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-        .format_if_mount_failed = false,
-        .max_files = 10,
-        .allocation_unit_size = 16 * 1024
-    };
-
     // SDMMC主机配置（使用1位模式以节省引脚）
     sdmmc_host_t host = SDMMC_HOST_DEFAULT();
     host.flags = SDMMC_HOST_FLAG_1BIT;  // 使用1位模式
@@ -70,6 +65,16 @@ static esp_err_t init_sd_card(void)
     
     ESP_LOGI(TAG, "SD card pins configured: CLK=%d, CMD=%d, D0=%d", 
              SD_PIN_CLK, SD_PIN_CMD, SD_PIN_D0);
+
+    // 【关键修复】挂载前增加较长延迟，确保 MobileNet 加载后的堆状态稳定
+    vTaskDelay(pdMS_TO_TICKS(200));
+
+    // 配置挂载参数
+    esp_vfs_fat_sdmmc_mount_config_t mount_config = {
+        .format_if_mount_failed = false,
+        .max_files = 5,
+        .allocation_unit_size = 16 * 1024
+    };
 
     // 挂载SD卡
     esp_err_t ret = esp_vfs_fat_sdmmc_mount(MOUNT_POINT_SD, &host, &slot_config, &mount_config, &g_card);
@@ -100,11 +105,26 @@ static esp_err_t init_sd_card(void)
     // 打印SD卡信息
     sdmmc_card_print_info(stdout, g_card);
     
-    // 创建资产目录
+    // 创建资产目录（确保父目录存在）
     struct stat st;
+    
+    // 首先检查挂载点是否存在
+    if (stat(MOUNT_POINT_SD, &st) != 0) {
+        ESP_LOGE(TAG, "Mount point %s does not exist!", MOUNT_POINT_SD);
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    // 检查并创建assets目录
     if (stat(ASSET_DIR_SD, &st) != 0) {
         ESP_LOGI(TAG, "Creating assets directory: %s", ASSET_DIR_SD);
-        mkdir(ASSET_DIR_SD, 0755);
+        int ret = mkdir(ASSET_DIR_SD, 0755);
+        if (ret != 0) {
+            ESP_LOGE(TAG, "Failed to create directory: %s (errno=%d)", ASSET_DIR_SD, errno);
+            return ESP_FAIL;
+        }
+        ESP_LOGI(TAG, "Directory created successfully");
+    } else {
+        ESP_LOGI(TAG, "Assets directory already exists");
     }
 
     ESP_LOGI(TAG, "SD card initialized successfully");
@@ -127,18 +147,25 @@ static void get_asset_file_path(const char *mac_address, char *path, size_t path
     char asset_dir[64];
     get_current_asset_dir(asset_dir, sizeof(asset_dir));
 
-    // 将MAC地址中的':'替换为'_'作为文件名
-    char safe_mac[MAC_ADDR_LEN + 1];
-    strncpy(safe_mac, mac_address, MAC_ADDR_LEN);
-    safe_mac[MAC_ADDR_LEN] = '\0';
+    // 【修复】使用MAC地址生成简短且唯一的文件名
+    // 方案: 提取MAC中的数字部分，生成8字符以内的文件名
+    // 例如: AA:BB:CC:DD:EE:FF -> A0B1C2 (取每段的第一个字符)
+    char short_name[9];  // 最多8个字符 + '\0'
+    int name_idx = 0;
     
-    for (int i = 0; i < strlen(safe_mac); i++) {
-        if (safe_mac[i] == ':') {
-            safe_mac[i] = '_';
+    // 遍历MAC地址，提取字母和数字，跳过冒号
+    for (int i = 0; mac_address[i] != '\0' && name_idx < 8; i++) {
+        char c = mac_address[i];
+        if (c != ':') {
+            short_name[name_idx++] = c;
         }
     }
+    short_name[name_idx] = '\0';
     
-    snprintf(path, path_size, "%s/%s.%s", asset_dir, safe_mac, extension);
+    snprintf(path, path_size, "%s/%s.%s", asset_dir, short_name, extension);
+    
+    ESP_LOGI(TAG, "Generated filename: %s (len=%d) from MAC: %s", 
+             short_name, strlen(short_name), mac_address);
 }
 
 /**
@@ -179,9 +206,100 @@ esp_err_t asset_save(const asset_record_t *record)
 
     ESP_LOGI(TAG, "Saving asset to: %s", file_path);
 
+    // 【新增】写入前检查SD卡剩余空间
+    esp_err_t space_check = asset_check_write_space(sizeof(asset_record_t), 10);
+    if (space_check == ESP_ERR_NO_MEM) {
+        ESP_LOGE(TAG, "Cannot save asset: SD card is full!");
+        return ESP_ERR_NO_MEM;
+    } else if (space_check == ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "Proceeding with save despite low space warning...");
+    }
+
+    // 【关键修复】在打开文件前，先确保目录存在
+    // 直接使用ASSET_DIR_SD常量，避免路径拼接错误
+    ESP_LOGI(TAG, "Checking directory: %s", ASSET_DIR_SD);
+    
+    struct stat st;
+    if (stat(ASSET_DIR_SD, &st) != 0) {
+        ESP_LOGW(TAG, "Assets directory not found, creating: %s", ASSET_DIR_SD);
+        
+        // 使用递归创建方式，先确保/sdcard存在
+        if (stat(MOUNT_POINT_SD, &st) != 0) {
+            ESP_LOGE(TAG, "Mount point %s does not exist! SD card may not be mounted.", MOUNT_POINT_SD);
+            return ESP_ERR_INVALID_STATE;
+        }
+        
+        int ret = mkdir(ASSET_DIR_SD, 0755);
+        if (ret != 0) {
+            ESP_LOGE(TAG, "Failed to create directory: %s (errno=%d - %s)", 
+                     ASSET_DIR_SD, errno, strerror(errno));
+            return ESP_FAIL;
+        }
+        ESP_LOGI(TAG, "Directory created successfully");
+    } else {
+        ESP_LOGI(TAG, "Directory already exists");
+    }
+
+    // 【调试】验证文件是否可以创建
+    ESP_LOGI(TAG, "Attempting to open file: %s", file_path);
+    ESP_LOGI(TAG, "File path length: %d bytes", strlen(file_path));
+    
+    // 【临时测试】尝试使用短文件名
+    char test_path[128];
+    snprintf(test_path, sizeof(test_path), "/sdcard/assets/test.dat");
+    ESP_LOGI(TAG, "Testing with short filename: %s", test_path);
+    
+    FILE *f_test = fopen(test_path, "wb");
+    if (f_test) {
+        ESP_LOGI(TAG, "Short filename test PASSED!");
+        fclose(f_test);
+        f_unlink(test_path);  // 删除测试文件
+    } else {
+        ESP_LOGE(TAG, "Short filename test FAILED (errno=%d)", errno);
+    }
+    
     FILE *f = fopen(file_path, "wb");
     if (!f) {
         ESP_LOGE(TAG, "Failed to open file for writing: %s", file_path);
+        ESP_LOGE(TAG, "Error code: %d - %s", errno, strerror(errno));
+        
+        // 常见错误诊断
+        switch (errno) {
+            case ENOENT:
+                ESP_LOGE(TAG, "Directory does not exist or path is invalid");
+                break;
+            case EACCES:
+                ESP_LOGE(TAG, "Permission denied or SD card is write-protected");
+                break;
+            case ENOSPC:
+                ESP_LOGE(TAG, "SD card is full");
+                break;
+            case EMFILE:
+                ESP_LOGE(TAG, "Too many open files");
+                break;
+            case EINVAL:
+                ESP_LOGE(TAG, "Invalid argument - possible path format issue");
+                ESP_LOGE(TAG, "Path length: %d", strlen(file_path));
+                // 检查路径是否包含非法字符
+                ESP_LOGI(TAG, "Path characters check:");
+                for (int i = 0; i < strlen(file_path); i++) {
+                    unsigned char c = file_path[i];
+                    if (c < 0x20 || c > 0x7E) {
+                        ESP_LOGE(TAG, "  Invalid character at position %d: 0x%02X ('%c')", i, c, c);
+                    }
+                }
+                // FATFS不允许的字符: < > : " / \ | ? *
+                const char *invalid_chars = "<>:\"/\\|?*";
+                for (int i = 0; i < strlen(file_path); i++) {
+                    if (strchr(invalid_chars, file_path[i])) {
+                        ESP_LOGE(TAG, "  FATFS invalid character '%c' at position %d", file_path[i], i);
+                    }
+                }
+                break;
+            default:
+                ESP_LOGE(TAG, "Unknown error");
+                break;
+        }
         return ESP_FAIL;
     }
 
@@ -214,6 +332,16 @@ esp_err_t asset_load(const char *mac_address, asset_record_t *record)
         return ESP_ERR_INVALID_ARG;
     }
 
+    // 【关键修复】在执行文件IO前，先复位看门狗并短暂延迟
+    // 防止之前的AI推理或摄像头操作留下的DMA/PSRAM竞争导致堆损坏
+    esp_task_wdt_reset();
+    
+    // 打印堆状态用于诊断
+    ESP_LOGI(TAG, "Free heap before load: %u", (unsigned int)esp_get_free_heap_size());
+    
+    // 【关键修复】大幅增加延迟，给硬件控制器足够的恢复时间
+    vTaskDelay(pdMS_TO_TICKS(300)); 
+
     char file_path[128];
     get_asset_file_path(mac_address, file_path, sizeof(file_path), "dat");
 
@@ -225,6 +353,10 @@ esp_err_t asset_load(const char *mac_address, asset_record_t *record)
     }
 
     ESP_LOGI(TAG, "Loading asset from: %s", file_path);
+
+    // 【关键修复】在打开文件前，再次确保看门狗复位并短暂延迟
+    esp_task_wdt_reset();
+    vTaskDelay(pdMS_TO_TICKS(50));
 
     FILE *f = fopen(file_path, "rb");
     if (!f) {
@@ -304,7 +436,30 @@ esp_err_t asset_list_all(int *count)
     struct dirent *entry;
     int asset_count = 0;
 
-    printf("\n=== Registered Assets (%s) ===\n", 
+    // 【新增】显示存储空间信息
+    uint64_t total_bytes, used_bytes, free_bytes;
+    esp_err_t ret = asset_get_storage_info(&total_bytes, &used_bytes, &free_bytes);
+    if (ret == ESP_OK) {
+        float total_mb = (float)total_bytes / (1024.0f * 1024.0f);
+        float used_mb = (float)used_bytes / (1024.0f * 1024.0f);
+        float free_mb = (float)free_bytes / (1024.0f * 1024.0f);
+        float usage_percent = ((float)used_bytes / (float)total_bytes) * 100.0f;
+        
+        printf("\n=== Storage Information ===\n");
+        printf("  Total: %.2f MB\n", total_mb);
+        printf("  Used:  %.2f MB (%.1f%%)\n", used_mb, usage_percent);
+        printf("  Free:  %.2f MB (%.1f%%)\n", free_mb, 100.0f - usage_percent);
+        
+        // 警告：空间不足
+        if (usage_percent > 90.0f) {
+            printf("  ⚠️  WARNING: SD card is almost full!\n");
+        } else if (usage_percent > 80.0f) {
+            printf("  ⚡ NOTICE: SD card space is running low.\n");
+        }
+        printf("===========================\n\n");
+    }
+
+    printf("=== Registered Assets (%s) ===\n", 
            g_current_storage_mode == STORAGE_MODE_SD_CARD ? "SD Card" : "SPIFFS");
     while ((entry = readdir(dir)) != NULL) {
         // 只处理.dat文件
@@ -357,6 +512,94 @@ esp_err_t asset_switch_storage_mode(storage_mode_t mode)
         return ESP_ERR_NOT_SUPPORTED;
     }
     
+    return ESP_OK;
+}
+
+/**
+ * @brief 获取SD卡存储空间信息
+ */
+esp_err_t asset_get_storage_info(uint64_t *total_bytes, uint64_t *used_bytes, uint64_t *free_bytes)
+{
+    if (!g_storage_initialized) {
+        ESP_LOGE(TAG, "Storage not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (!total_bytes || !used_bytes || !free_bytes) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    FATFS *fs;
+    DWORD free_clusters, total_clusters;
+    
+    // 获取文件系统信息
+    FRESULT res = f_getfree("0:", &free_clusters, &fs);
+    if (res != FR_OK) {
+        ESP_LOGE(TAG, "Failed to get filesystem info: %d", res);
+        return ESP_FAIL;
+    }
+
+    total_clusters = fs->n_fatent - 2;
+    
+    // 【修复】使用FATFS结构体成员直接计算，避免使用SS()宏
+    // csize = clusters per sector, ssize = sector size in bytes
+    uint32_t sectors_per_cluster = fs->csize;
+    uint32_t bytes_per_sector = 512;  // SD卡标准扇区大小为512字节
+    
+    // 计算字节数
+    *total_bytes = (uint64_t)total_clusters * sectors_per_cluster * bytes_per_sector;
+    *free_bytes = (uint64_t)free_clusters * sectors_per_cluster * bytes_per_sector;
+    *used_bytes = *total_bytes - *free_bytes;
+
+    return ESP_OK;
+}
+
+/**
+ * @brief 检查写入前的剩余空间是否充足
+ * @param required_bytes 需要写入的字节数
+ * @param warning_threshold_percent 警告阈值百分比（0-100），默认10%
+ * @return ESP_OK表示空间充足，ESP_ERR_NO_MEM表示空间不足，ESP_ERR_INVALID_STATE表示空间紧张但可写入
+ */
+esp_err_t asset_check_write_space(size_t required_bytes, uint8_t warning_threshold_percent)
+{
+    if (!g_storage_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // 默认警告阈值为10%
+    if (warning_threshold_percent == 0 || warning_threshold_percent > 100) {
+        warning_threshold_percent = 10;
+    }
+
+    uint64_t total_bytes, used_bytes, free_bytes;
+    esp_err_t ret = asset_get_storage_info(&total_bytes, &used_bytes, &free_bytes);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    // 检查是否有足够空间
+    if (free_bytes < required_bytes) {
+        ESP_LOGE(TAG, "Insufficient space! Required: %zu bytes, Available: %llu bytes", 
+                 required_bytes, free_bytes);
+        return ESP_ERR_NO_MEM;
+    }
+
+    // 计算使用百分比
+    float usage_percent = ((float)used_bytes / (float)total_bytes) * 100.0f;
+    float free_percent = 100.0f - usage_percent;
+
+    // 检查是否低于警告阈值
+    if (free_percent < warning_threshold_percent) {
+        ESP_LOGW(TAG, "WARNING: SD card space is running low!");
+        ESP_LOGW(TAG, "  Total: %.2f MB, Used: %.2f MB (%.1f%%), Free: %.2f MB (%.1f%%)",
+                 (float)total_bytes / (1024.0f * 1024.0f),
+                 (float)used_bytes / (1024.0f * 1024.0f),
+                 usage_percent,
+                 (float)free_bytes / (1024.0f * 1024.0f),
+                 free_percent);
+        return ESP_ERR_INVALID_STATE;  // 返回警告但仍可写入
+    }
+
     return ESP_OK;
 }
 

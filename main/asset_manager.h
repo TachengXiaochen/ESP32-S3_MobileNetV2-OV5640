@@ -76,6 +76,23 @@ storage_mode_t asset_get_storage_mode(void);
 esp_err_t asset_switch_storage_mode(storage_mode_t mode);
 
 /**
+ * @brief 获取SD卡存储空间信息
+ * @param total_bytes 输出参数，总容量（字节）
+ * @param used_bytes 输出参数，已用空间（字节）
+ * @param free_bytes 输出参数，可用空间（字节）
+ * @return ESP_OK表示成功
+ */
+esp_err_t asset_get_storage_info(uint64_t *total_bytes, uint64_t *used_bytes, uint64_t *free_bytes);
+
+/**
+ * @brief 检查写入前的剩余空间是否充足
+ * @param required_bytes 需要写入的字节数
+ * @param warning_threshold_percent 警告阈值百分比（0-100），默认10%
+ * @return ESP_OK表示空间充足，ESP_ERR_NO_MEM表示空间不足，ESP_WARN表示空间紧张但可写入
+ */
+esp_err_t asset_check_write_space(size_t required_bytes, uint8_t warning_threshold_percent);
+
+/**
  * @brief 反初始化管理器（卸载存储）
  */
 void asset_manager_deinit(void);

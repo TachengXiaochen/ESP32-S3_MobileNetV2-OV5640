@@ -1,7 +1,37 @@
+﻿#include "esp_system.h"
+
+// 通过串口输出所有资产列表
+void asset_list_uart(void) {
+    int count = 0;
+    extern esp_err_t asset_list_all(int *count);
+    char buf[128];
+    uart_write_bytes(UART_NUM, (const char *)"\r\n[ASSET LIST]\r\n", 16);
+    esp_err_t ret = asset_list_all(&count);
+    if (ret == ESP_OK) {
+        snprintf(buf, sizeof(buf), "Total: %d assets\r\n", count);
+        uart_write_bytes(UART_NUM, buf, strlen(buf));
+    } else {
+        uart_write_bytes(UART_NUM, (const char *)"Failed to list assets or storage not initialized.\r\n", 51);
+    }
+}
+
+// 通过串口输出系统信息
+void print_system_info_uart(void) {
+    char buf[128];
+    snprintf(buf, sizeof(buf), "Free heap: %u bytes\r\n", (unsigned)esp_get_free_heap_size());
+    uart_write_bytes(UART_NUM, buf, strlen(buf));
+    snprintf(buf, sizeof(buf), "Min free heap: %u bytes\r\n", (unsigned)esp_get_minimum_free_heap_size());
+    uart_write_bytes(UART_NUM, buf, strlen(buf));
+    snprintf(buf, sizeof(buf), "SDK version: %s\r\n", esp_get_idf_version());
+    uart_write_bytes(UART_NUM, buf, strlen(buf));
+}
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
 #include <float.h>
+#include <sys/stat.h>    // stat, mkdir
+#include <dirent.h>      // opendir, readdir
+#include <errno.h>       // errno
 #include "esp_log.h"
 #include "esp_camera.h"
 #include "esp_timer.h"
@@ -13,8 +43,48 @@
 #include "esp_task_wdt.h"
 #include "sdkconfig.h"
 
-#include "mobilenet_wrapper.h"
-#include "asset_manager.h"
+// Modular interfaces
+#include "camera_module.h"
+#include "storage_module.h"
+#include "ai_module.h"
+#include "asset_manager.h" // For asset_record_t and MAC_ADDR_LEN if defined there
+
+// ========== FreeRTOS 任务与队列定义 ==========
+#define UART_QUEUE_LEN    10
+#define STORAGE_QUEUE_LEN 5
+
+// 摄像头状态枚举
+typedef enum {
+    CAM_STATE_WAITING_MAC = 0,
+    CAM_STATE_READY = 1
+} camera_state_t;
+
+// 视图状态枚举
+typedef enum {
+    VIEW_NONE = 0,
+    VIEW_FRONT = 1,
+    VIEW_SIDE = 2,
+    VIEW_TOP = 3
+} view_state_t;
+
+typedef enum {
+    CMD_INIT_CAMERA,
+    CMD_CAPTURE_FRONT,
+    CMD_CAPTURE_SIDE,
+    CMD_CAPTURE_TOP,
+    CMD_SAVE_ASSET,
+    CMD_INIT_STORAGE,
+    CMD_START_INVENTORY  // 新增：启动盘点模式
+} system_cmd_t;
+
+typedef struct {
+    system_cmd_t cmd;
+    void *data;        // 用于传递特征向量指针等
+    char mac[MAC_ADDR_LEN + 1];
+} system_msg_t;
+
+static QueueHandle_t xSystemQueue = NULL;
+static QueueHandle_t xStorageQueue = NULL;
 
 // 看门狗函数声明（如果头文件中未定义）
 esp_err_t esp_task_wdt_add(TaskHandle_t handle);
@@ -38,68 +108,37 @@ esp_err_t esp_task_wdt_reset(void);
 #define UART_BAUD_RATE 115200
 #define UART_BUF_SIZE (1024 * 2)
 
-// 特征向量相似度阈值 (调整为更合适的数值)
-#define COSINE_THRESHOLD 0.85f
-
-// MAC地址最大长度已在asset_manager.h中定义，此处不再重复定义
-// 使用 asset_manager.h 中的 MAC_ADDR_LEN (17字符: AA:BB:CC:DD:EE:FF)
-
-// 摄像头状态
-typedef enum {
-    CAM_STATE_IDLE,           // 空闲状态，等待MAC地址
-    CAM_STATE_WAITING_MAC,    // 等待MAC地址输入
-    CAM_STATE_READY,          // MAC地址已输入，摄像头可用
-} camera_state_t;
-
-// 三视图拍摄状态
-typedef enum {
-    VIEW_NONE = 0,
-    VIEW_FRONT = 1,     // 正面
-    VIEW_SIDE = 2,      // 侧面
-    VIEW_TOP = 3,       // 顶部
-    VIEW_COMPLETE = 4   // 三视图完成
-} view_state_t;
-
-// ESP32-S3 常见 OV5640 摄像头引脚定义
-#define CAM_PIN_PWDN   -1
-#define CAM_PIN_RESET  -1
-#define CAM_PIN_XCLK   15
-#define CAM_PIN_SIOD   4
-#define CAM_PIN_SIOC   5
-#define CAM_PIN_D7     16
-#define CAM_PIN_D6     17
-#define CAM_PIN_D5     18
-#define CAM_PIN_D4     12
-#define CAM_PIN_D3     10
-#define CAM_PIN_D2     8
-#define CAM_PIN_D1     9
-#define CAM_PIN_D0     11
-#define CAM_PIN_V_SYNC 6
-#define CAM_PIN_H_SYNC 7
-#define CAM_PIN_PCLK   13
+// 特征向量维度
+#define FEATURE_VEC_SIZE 1280
 
 static const char *TAG = "camera_ai";
 
-// 全局特征向量存储（1280 维）
-#define FEATURE_VEC_SIZE 1280
-static float g_stored_feature[FEATURE_VEC_SIZE] = {0};
-static bool g_feature_stored = false;
+// Global state variables
+static bool g_camera_ready = false;
+static bool g_storage_ready = false;
 
-// MAC地址存储
-static char g_current_mac[MAC_ADDR_LEN + 1] = {0};
-static camera_state_t g_camera_state = CAM_STATE_WAITING_MAC;
+// Shared state for multi-view capture
+float g_front_feature[FEATURE_VEC_SIZE] = {0};
+float g_side_feature[FEATURE_VEC_SIZE] = {0};
+float g_top_feature[FEATURE_VEC_SIZE] = {0};
 
-// 存储初始化状态标志
-static bool g_storage_initialized = false;
+// 盘点模式状态
+typedef enum {
+    INVENTORY_IDLE = 0,
+    INVENTORY_WAITING_FRONT,   // 等待正面拍摄
+    INVENTORY_WAITING_SIDE,    // 等待侧面拍摄
+    INVENTORY_WAITING_TOP,     // 等待顶部拍摄
+    INVENTORY_ANALYZING        // 分析阶段
+} inventory_state_t;
 
-// 摄像头电源状态标志
-static bool g_camera_power_on = false;
+static inventory_state_t g_inventory_state = INVENTORY_IDLE;
+static float g_inventory_confidence[3] = {0}; // 三个视图的置信度
 
-// 三视图特征存储
-static float g_front_feature[FEATURE_VEC_SIZE] = {0};
-static float g_side_feature[FEATURE_VEC_SIZE] = {0};
-static float g_top_feature[FEATURE_VEC_SIZE] = {0};
-static view_state_t g_view_state = VIEW_NONE;
+char g_current_mac[MAC_ADDR_LEN + 1] = {0};
+camera_state_t g_camera_state = CAM_STATE_WAITING_MAC;
+view_state_t g_view_state = VIEW_NONE;
+bool g_camera_power_on = false;
+bool g_storage_initialized = false;
 
 static void init_uart(void)
 {
@@ -116,67 +155,6 @@ static void init_uart(void)
     uart_driver_install(UART_NUM, UART_BUF_SIZE, 0, 0, NULL, 0);
     
     ESP_LOGI(TAG, "UART initialized at %d baud", UART_BAUD_RATE);
-}
-
-static void init_camera(void)
-{
-    camera_config_t config = {
-        .ledc_channel = LEDC_CHANNEL_0,
-        .ledc_timer = LEDC_TIMER_0,
-        .pin_d0 = CAM_PIN_D0,
-        .pin_d1 = CAM_PIN_D1,
-        .pin_d2 = CAM_PIN_D2,
-        .pin_d3 = CAM_PIN_D3,
-        .pin_d4 = CAM_PIN_D4,
-        .pin_d5 = CAM_PIN_D5,
-        .pin_d6 = CAM_PIN_D6,
-        .pin_d7 = CAM_PIN_D7,
-        .pin_xclk = CAM_PIN_XCLK,
-        .pin_pclk = CAM_PIN_PCLK,
-        .pin_vsync = CAM_PIN_V_SYNC,
-        .pin_href = CAM_PIN_H_SYNC,
-        .pin_sscb_sda = CAM_PIN_SIOD,
-        .pin_sscb_scl = CAM_PIN_SIOC,
-        .pin_pwdn = CAM_PIN_PWDN,
-        .pin_reset = CAM_PIN_RESET,
-        .xclk_freq_hz = 10000000,
-        .pixel_format = PIXFORMAT_RGB565,
-        .frame_size = FRAMESIZE_96X96,
-        .jpeg_quality = 12,
-        .fb_count = 2,
-        .fb_location = CAMERA_FB_IN_PSRAM,
-        .grab_mode = CAMERA_GRAB_LATEST,
-    };
-
-    esp_err_t err = esp_camera_init(&config);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Camera init failed: 0x%x", err);
-        return;
-    }
-    ESP_LOGI(TAG, "Camera init OK");
-}
-
-// 余弦相似度计算
-static float cosine_similarity(const float *a, const float *b, size_t len)
-{
-    float dot_product = 0.0f;
-    float norm_a = 0.0f;
-    float norm_b = 0.0f;
-    
-    for (size_t i = 0; i < len; i++) {
-        dot_product += a[i] * b[i];
-        norm_a += a[i] * a[i];
-        norm_b += b[i] * b[i];
-    }
-    
-    norm_a = sqrtf(norm_a);
-    norm_b = sqrtf(norm_b);
-    
-    if (norm_a < 1e-6f || norm_b < 1e-6f) {
-        return 0.0f;
-    }
-    
-    return dot_product / (norm_a * norm_b);
 }
 
 // 验证MAC地址格式
@@ -203,54 +181,7 @@ static bool validate_mac_address(const char *mac)
     return true;
 }
 
-// 从MobileNetV2模型提取特征向量
-static bool extract_feature_from_mobilenet(float *feature_vec, size_t feature_size)
-{
-    ESP_LOGI(TAG, "Extracting features using MobileNetV2 wrapper...");
-    return mobilenet_extract_features(feature_vec, feature_size);
-}
-
-// 关闭摄像头(节能模式)
-static void camera_power_off(void)
-{
-    if (g_camera_power_on) {
-        ESP_LOGI(TAG, "Powering off camera for energy saving...");
-        esp_err_t ret = esp_camera_deinit();
-        if (ret == ESP_OK) {
-            g_camera_power_on = false;
-            uart_write_bytes(UART_NUM, (const char *)"Camera powered OFF (energy saving mode)\r\n", 41);
-            ESP_LOGI(TAG, "Camera deinitialized successfully");
-        } else {
-            uart_write_bytes(UART_NUM, (const char *)"WARNING: Failed to power off camera\r\n", 37);
-            ESP_LOGE(TAG, "esp_camera_deinit failed: 0x%x", ret);
-        }
-    } else {
-        ESP_LOGI(TAG, "Camera already powered off");
-    }
-}
-
-// 唤醒摄像头
-static esp_err_t camera_power_on(void)
-{
-    if (!g_camera_power_on) {
-        ESP_LOGI(TAG, "Powering on camera...");
-        uart_write_bytes(UART_NUM, (const char *)"Waking up camera...\r\n", 21);
-        
-        // 重新初始化摄像头
-        init_camera();
-        
-        // 延迟等待DMA稳定
-        vTaskDelay(pdMS_TO_TICKS(300));
-        
-        g_camera_power_on = true;
-        uart_write_bytes(UART_NUM, (const char *)"Camera powered ON\r\n", 20);
-        ESP_LOGI(TAG, "Camera reinitialized successfully");
-        return ESP_OK;
-    }
-    return ESP_OK; // 已经开启
-}
-
-// 处理串口命令 - 支持MAC地址输入和WiFi控制
+// 处理串口命令 - 仅负责发送指令到队列
 static void handle_uart_command(const char *cmd_str)
 {
     // 去除末尾换行符
@@ -287,6 +218,27 @@ static void handle_uart_command(const char *cmd_str)
                  mode == STORAGE_MODE_SD_CARD ? "SD Card" : "SPIFFS (Internal Flash)");
         uart_write_bytes(UART_NUM, (const char *)msg, strlen(msg));
         return;
+    } else if (strcasecmp(cmd, "l") == 0 || strcasecmp(cmd, "list") == 0) {
+        // 列出所有资产
+        extern void asset_list_uart(void); // 需在asset_manager.c实现
+        asset_list_uart();
+        return;
+    } else if (strcasecmp(cmd, "i") == 0 || strcasecmp(cmd, "info") == 0) {
+        // 显示系统信息
+        extern void print_system_info_uart(void); // 需在main.c或其他文件实现
+        print_system_info_uart();
+        return;
+    } else if (strcasecmp(cmd, "help") == 0 || strcmp(cmd, "?") == 0) {
+        // 显示帮助
+        uart_write_bytes(UART_NUM, (const char *)"\r\n[HELP] Command List:\r\n", 26);
+        uart_write_bytes(UART_NUM, (const char *)"  MAC地址: AA:BB:CC:DD:EE:FF\r\n", 32);
+        uart_write_bytes(UART_NUM, (const char *)"  f/s/t: 拍摄正/侧/顶视图\r\n", 30);
+        uart_write_bytes(UART_NUM, (const char *)"  c: 进入盘点引导模式\r\n", 26);
+        uart_write_bytes(UART_NUM, (const char *)"  l: 列出所有资产\r\n", 20);
+        uart_write_bytes(UART_NUM, (const char *)"  i: 显示系统信息\r\n", 20);
+        uart_write_bytes(UART_NUM, (const char *)"  storage sd/flash/status: 存储相关\r\n", 38);
+        uart_write_bytes(UART_NUM, (const char *)"  help/?: 显示本帮助\r\n", 22);
+        return;
     }
     
     // MAC地址输入（仅在等待MAC状态时接受）
@@ -294,363 +246,90 @@ static void handle_uart_command(const char *cmd_str)
         if (validate_mac_address(cmd)) {
             strncpy(g_current_mac, cmd, MAC_ADDR_LEN);
             
-            // 复位看门狗（防止长耗时操作导致重启）
-            SAFE_WDT_RESET();
+            // 1. 发送初始化存储指令
+            system_msg_t init_storage_msg = {0};
+            init_storage_msg.cmd = CMD_INIT_STORAGE;
+            xQueueSend(xStorageQueue, &init_storage_msg, portMAX_DELAY);
             
-            // ========== 阶段2: 硬件初始化(串行化,避免并发) ==========
-            
-            // 1. 初始化摄像头
-            uart_write_bytes(UART_NUM, (const char *)"Initializing camera...\r\n", 26);
-            init_camera();
-            g_camera_power_on = true;  // 标记摄像头已开启
-            
-            // 复位看门狗
-            SAFE_WDT_RESET();
-            
-            // 2. 延迟500ms让摄像头DMA稳定
-            vTaskDelay(pdMS_TO_TICKS(500));
-            
-            // 3. 初始化SD卡存储
-            uart_write_bytes(UART_NUM, (const char *)"Initializing SD card...\r\n", 26);
-            esp_err_t ret = asset_manager_init();
-            if (ret != ESP_OK) {
-                uart_write_bytes(UART_NUM, (const char *)"Storage init FAILED. Continuing without storage.\r\n", 50);
-                ESP_LOGW(TAG, "SD card initialization failed (0x%x). System will run without persistence.", ret);
-                
-                // 关键修复：禁用SD卡模式，防止后续操作尝试访问无效的存储
-                g_storage_initialized = false;
-            } else {
-                uart_write_bytes(UART_NUM, (const char *)"Storage initialized\r\n", 22);
-                g_storage_initialized = true;
-                
-                // 检查该MAC是否已存在
-                asset_record_t existing_record;
-                ret = asset_load(g_current_mac, &existing_record);
-                if (ret == ESP_OK) {
-                    char msg[128];
-                    snprintf(msg, sizeof(msg), "WARNING: MAC %s already registered!\r\n", g_current_mac);
-                    uart_write_bytes(UART_NUM, (const char *)msg, strlen(msg));
-                    uart_write_bytes(UART_NUM, (const char *)"Overwriting existing record...\r\n", 35);
-                }
-            }
-            
-            // 复位看门狗
-            SAFE_WDT_RESET();
+            // 2. 发送初始化摄像头指令
+            system_msg_t init_cam_msg = {0};
+            init_cam_msg.cmd = CMD_INIT_CAMERA;
+            xQueueSend(xSystemQueue, &init_cam_msg, portMAX_DELAY);
             
             g_camera_state = CAM_STATE_READY;
-            
-            char msg[128];
-            snprintf(msg, sizeof(msg), "MAC address set: %s\r\n", g_current_mac);
-            uart_write_bytes(UART_NUM, (const char *)msg, strlen(msg));
-            
-            // 提示用户可以进行三视图拍摄
-            uart_write_bytes(UART_NUM, (const char *)"=== Asset Registration Mode ===\r\n", 34);
-            uart_write_bytes(UART_NUM, (const char *)"Send 'f' to capture FRONT view\r\n", 34);
-            uart_write_bytes(UART_NUM, (const char *)"Send 's' to capture SIDE view\r\n", 32);
-            uart_write_bytes(UART_NUM, (const char *)"Send 't' to capture TOP view\r\n", 31);
-            uart_write_bytes(UART_NUM, (const char *)"Send 'c' to check inventory\r\n", 30);
-            uart_write_bytes(UART_NUM, (const char *)"Send 'l' to list all assets\r\n", 30);
-            uart_write_bytes(UART_NUM, (const char *)"Send 'p' to power OFF camera (save energy)\r\n", 45);
-            uart_write_bytes(UART_NUM, (const char *)"Send 'w' to wake UP camera\r\n", 29);
-            uart_write_bytes(UART_NUM, (const char *)"Send 'r' to reset and input new MAC\r\n", 37);
-
+            uart_write_bytes(UART_NUM, (const char *)"\r\n[SYSTEM] Hardware initialized.\r\n", 34);
+            uart_write_bytes(UART_NUM, (const char *)"[GUIDE] Please input 'f' (Front), 's' (Side), or 't' (Top) to capture.\r\n", 69);
         } else {
-            uart_write_bytes(UART_NUM, (const char *)"Invalid MAC format. Use XX:XX:XX:XX:XX:XX\r\n", 42);
+            uart_write_bytes(UART_NUM, (const char *)"Invalid MAC address format. Example: AA:BB:CC:DD:EE:FF\r\n", 58);
         }
         return;
     }
 
-    // 摄像头就绪状态下的命令处理
+    // 拍摄命令通过队列发送
     if (g_camera_state == CAM_STATE_READY) {
-        switch (cmd[0]) {
-            case 'f':
-            case 'F':
-                // 拍摄正面视图
-                if (g_view_state >= VIEW_FRONT) {
-                    uart_write_bytes(UART_NUM, (const char *)"Front view already captured\r\n", 31);
-                    break;
-                }
-                ESP_LOGI(TAG, "Capturing FRONT view for MAC: %s", g_current_mac);
-                uart_write_bytes(UART_NUM, (const char *)"Preparing to capture FRONT view...\r\n", 38);
-                
-                if (extract_feature_from_mobilenet(g_front_feature, FEATURE_VEC_SIZE)) {
-                    g_view_state = VIEW_FRONT;
-                    uart_write_bytes(UART_NUM, (const char *)"FRONT view captured successfully\r\n", 36);
-                    uart_write_bytes(UART_NUM, (const char *)"Next: Send 's' to capture SIDE view\r\n", 37);
-                    ESP_LOGI(TAG, "Front view feature stored");
-                } else {
-                    uart_write_bytes(UART_NUM, (const char *)"FRONT view capture FAILED\r\n", 28);
-                    ESP_LOGE(TAG, "Failed to capture front view");
-                }
-                break;
-                
-            case 's':
-            case 'S':
-                // 拍摄侧面视图
-                if (g_view_state < VIEW_FRONT) {
-                    uart_write_bytes(UART_NUM, (const char *)"Please capture FRONT view first\r\n", 34);
-                    break;
-                }
-                if (g_view_state >= VIEW_SIDE) {
-                    uart_write_bytes(UART_NUM, (const char *)"Side view already captured\r\n", 30);
-                    break;
-                }
-                ESP_LOGI(TAG, "Capturing SIDE view for MAC: %s", g_current_mac);
-                uart_write_bytes(UART_NUM, (const char *)"Preparing to capture SIDE view...\r\n", 37);
-                
-                if (extract_feature_from_mobilenet(g_side_feature, FEATURE_VEC_SIZE)) {
-                    g_view_state = VIEW_SIDE;
-                    uart_write_bytes(UART_NUM, (const char *)"SIDE view captured successfully\r\n", 35);
-                    uart_write_bytes(UART_NUM, (const char *)"Next: Send 't' to capture TOP view\r\n", 36);
-                    ESP_LOGI(TAG, "Side view feature stored");
-                } else {
-                    uart_write_bytes(UART_NUM, (const char *)"SIDE view capture FAILED\r\n", 27);
-                    ESP_LOGE(TAG, "Failed to capture side view");
-                }
-                break;
-                
-            case 't':
-            case 'T':
-                // 拍摄顶部视图
-                if (g_view_state < VIEW_SIDE) {
-                    uart_write_bytes(UART_NUM, (const char *)"Please capture FRONT and SIDE views first\r\n", 42);
-                    break;
-                }
-                if (g_view_state >= VIEW_TOP) {
-                    uart_write_bytes(UART_NUM, (const char *)"Top view already captured\r\n", 29);
-                    break;
-                }
-                ESP_LOGI(TAG, "Capturing TOP view for MAC: %s", g_current_mac);
-                uart_write_bytes(UART_NUM, (const char *)"Preparing to capture TOP view...\r\n", 36);
-                
-                if (extract_feature_from_mobilenet(g_top_feature, FEATURE_VEC_SIZE)) {
-                    g_view_state = VIEW_TOP;
-                    uart_write_bytes(UART_NUM, (const char *)"TOP view captured successfully\r\n", 34);
-                    
-                    // 【关键修复】推理完成后增加额外延迟,确保堆管理器稳定
-                    // 这是防止fopen崩溃的关键步骤
-                    ESP_LOGI(TAG, "Waiting for heap stabilization after inference...");
-                    vTaskDelay(pdMS_TO_TICKS(500));  // 额外等待500ms
-                    
-                    // 复位看门狗，准备保存数据
-                    SAFE_WDT_RESET();
-                    
-                    // 保存资产记录到SD卡（仅在存储已初始化时）
-                    if (g_storage_initialized) {
-                        ESP_LOGI(TAG, "Starting asset save operation...");
-                        
-                        // 【关键修复】使用静态变量避免栈溢出(15KB结构体!)
-                        static asset_record_t record;
-                        strncpy(record.mac_address, g_current_mac, MAC_ADDR_LEN);
-                        record.mac_address[MAC_ADDR_LEN] = '\0';
-                        memcpy(record.front_feature, g_front_feature, sizeof(g_front_feature));
-                        memcpy(record.side_feature, g_side_feature, sizeof(g_side_feature));
-                        memcpy(record.top_feature, g_top_feature, sizeof(g_top_feature));
-                        record.is_valid = true;
-                        
-                        esp_err_t ret = asset_save(&record);
-                        if (ret == ESP_OK) {
-                            uart_write_bytes(UART_NUM, (const char *)"Asset SAVED to SD card\r\n", 26);
-                            ESP_LOGI(TAG, "Asset saved successfully");
-                        } else {
-                            uart_write_bytes(UART_NUM, (const char *)"WARNING: Failed to save to SD card\r\n", 36);
-                            ESP_LOGE(TAG, "asset_save failed with error: 0x%x", ret);
-                        }
+        system_msg_t msg = {0}; // 初始化为0确保所有字段干净
+        strncpy(msg.mac, g_current_mac, MAC_ADDR_LEN);
+        msg.mac[MAC_ADDR_LEN] = '\0'; // 显式确保字符串终止
+        
+        // 检查是否处于盘点模式
+        if (g_inventory_state != INVENTORY_IDLE) {
+            // 盘点模式下的引导式拍摄
+            switch (cmd[0]) {
+                case 'f':
+                case 'F':
+                    if (g_inventory_state == INVENTORY_WAITING_FRONT) {
+                        msg.cmd = CMD_CAPTURE_FRONT;
+                        xQueueSend(xSystemQueue, &msg, portMAX_DELAY);
                     } else {
-                        uart_write_bytes(UART_NUM, (const char *)"SKIPPED: Storage not initialized\r\n", 35);
-                        ESP_LOGW(TAG, "Asset registration completed but NOT saved (storage unavailable)");
+                        uart_write_bytes(UART_NUM, (const char *)"\r\n[INVENTORY] Please capture FRONT view first\r\n", 46);
                     }
+                    break;
                     
-                    uart_write_bytes(UART_NUM, (const char *)"=== All three views completed! ===\r\n", 36);
-                    uart_write_bytes(UART_NUM, (const char *)"Asset registered. Send 'c' for inventory check\r\n", 50);
-                    ESP_LOGI(TAG, "Top view feature stored - registration complete");
+                case 's':
+                case 'S':
+                    if (g_inventory_state == INVENTORY_WAITING_SIDE) {
+                        msg.cmd = CMD_CAPTURE_SIDE;
+                        xQueueSend(xSystemQueue, &msg, portMAX_DELAY);
+                    } else {
+                        uart_write_bytes(UART_NUM, (const char *)"\r\n[INVENTORY] Please capture SIDE view now\r\n", 42);
+                    }
+                    break;
                     
-                    // ========== 节能功能: 三视图完成后自动关闭摄像头 ==========
-                    vTaskDelay(pdMS_TO_TICKS(200)); // 短暂延迟让用户看到完成提示
-                    camera_power_off();
-                    uart_write_bytes(UART_NUM, (const char *)"\r\n[Energy Saving] Camera auto-off after registration\r\n", 54);
-                    uart_write_bytes(UART_NUM, (const char *)"Send 'w' to wake up camera when needed\r\n", 41);
-                } else {
-                    uart_write_bytes(UART_NUM, (const char *)"TOP view capture FAILED\r\n", 27);
-                    ESP_LOGE(TAG, "Failed to capture top view");
-                }
-                break;
-                
-            case 'c':
-            case 'C':
-                // 盘点检查
-                if (g_view_state != VIEW_TOP) {
-                    uart_write_bytes(UART_NUM, (const char *)"Registration incomplete. Please capture all 3 views first\r\n", 60);
-                    break;
-                }
-                ESP_LOGI(TAG, "Starting inventory check for MAC: %s", g_current_mac);
-                uart_write_bytes(UART_NUM, (const char *)"=== Inventory Check Mode ===\r\n", 31);
-                uart_write_bytes(UART_NUM, (const char *)"Please position the item and send:\r\n", 39);
-                uart_write_bytes(UART_NUM, (const char *)"  '1' - Capture FRONT for comparison\r\n", 39);
-                uart_write_bytes(UART_NUM, (const char *)"  '2' - Capture SIDE for comparison\r\n", 38);
-                uart_write_bytes(UART_NUM, (const char *)"  '3' - Capture TOP for comparison\r\n", 37);
-                break;
-                
-            case 'l':
-            case 'L':
-                // 列出所有资产
-                ESP_LOGI(TAG, "Listing all registered assets");
-                uart_write_bytes(UART_NUM, (const char *)"\r\n", 2);
-                
-                int count = 0;
-                esp_err_t ret = asset_list_all(&count);
-                if (ret != ESP_OK) {
-                    uart_write_bytes(UART_NUM, (const char *)"Failed to list assets\r\n", 25);
-                }
-                break;
-                
-            case '1':
-                // 盘点：比对正面视图
-                if (g_view_state != VIEW_TOP) {
-                    uart_write_bytes(UART_NUM, (const char *)"Registration not complete\r\n", 28);
-                    break;
-                }
-                
-                // 节能功能: 如果摄像头已关闭,先唤醒
-                if (!g_camera_power_on) {
-                    camera_power_on();
-                }
-                
-                ESP_LOGI(TAG, "Inventory: Capturing FRONT view for comparison");
-                uart_write_bytes(UART_NUM, (const char *)"Capturing FRONT view for comparison...\r\n", 41);
-                
-                {
-                    static float current_feature[FEATURE_VEC_SIZE];
-                    if (extract_feature_from_mobilenet(current_feature, FEATURE_VEC_SIZE)) {
-                        float similarity = cosine_similarity(g_front_feature, current_feature, FEATURE_VEC_SIZE);
-                        char msg[128];
-                        snprintf(msg, sizeof(msg), "FRONT similarity: %.4f ", similarity);
-                        
-                        if (similarity >= COSINE_THRESHOLD) {
-                            strcat(msg, "[MATCH]\r\n");
-                        } else {
-                            strcat(msg, "[NO MATCH]\r\n");
-                        }
-                        uart_write_bytes(UART_NUM, (const char *)msg, strlen(msg));
-                        ESP_LOGI(TAG, "Front view similarity: %.4f", similarity);
+                case 't':
+                case 'T':
+                    if (g_inventory_state == INVENTORY_WAITING_TOP) {
+                        msg.cmd = CMD_CAPTURE_TOP;
+                        xQueueSend(xSystemQueue, &msg, portMAX_DELAY);
                     } else {
-                        uart_write_bytes(UART_NUM, (const char *)"FRONT capture failed\r\n", 23);
+                        uart_write_bytes(UART_NUM, (const char *)"\r\n[INVENTORY] Please capture TOP view last\r\n", 43);
                     }
-                }
-                break;
-                
-            case '2':
-                // 盘点：比对侧面视图
-                if (g_view_state != VIEW_TOP) {
-                    uart_write_bytes(UART_NUM, (const char *)"Registration not complete\r\n", 28);
                     break;
-                }
-                
-                // 节能功能: 如果摄像头已关闭,先唤醒
-                if (!g_camera_power_on) {
-                    camera_power_on();
-                }
-                
-                ESP_LOGI(TAG, "Inventory: Capturing SIDE view for comparison");
-                uart_write_bytes(UART_NUM, (const char *)"Capturing SIDE view for comparison...\r\n", 40);
-                
-                {
-                    static float current_feature[FEATURE_VEC_SIZE];
-                    if (extract_feature_from_mobilenet(current_feature, FEATURE_VEC_SIZE)) {
-                        float similarity = cosine_similarity(g_side_feature, current_feature, FEATURE_VEC_SIZE);
-                        char msg[128];
-                        snprintf(msg, sizeof(msg), "SIDE similarity: %.4f ", similarity);
-                        
-                        if (similarity >= COSINE_THRESHOLD) {
-                            strcat(msg, "[MATCH]\r\n");
-                        } else {
-                            strcat(msg, "[NO MATCH]\r\n");
-                        }
-                        uart_write_bytes(UART_NUM, (const char *)msg, strlen(msg));
-                        ESP_LOGI(TAG, "Side view similarity: %.4f", similarity);
-                    } else {
-                        uart_write_bytes(UART_NUM, (const char *)"SIDE capture failed\r\n", 22);
-                    }
-                }
-                break;
-                
-            case '3':
-                // 盘点：比对顶部视图
-                if (g_view_state != VIEW_TOP) {
-                    uart_write_bytes(UART_NUM, (const char *)"Registration not complete\r\n", 28);
+                    
+                default:
+                    uart_write_bytes(UART_NUM, (const char *)"\r\n[INVENTORY] Follow the guide: f -> s -> t\r\n", 44);
                     break;
-                }
-                
-                // 节能功能: 如果摄像头已关闭,先唤醒
-                if (!g_camera_power_on) {
-                    camera_power_on();
-                }
-                
-                ESP_LOGI(TAG, "Inventory: Capturing TOP view for comparison");
-                uart_write_bytes(UART_NUM, (const char *)"Capturing TOP view for comparison...\r\n", 39);
-                
-                {
-                    static float current_feature[FEATURE_VEC_SIZE];
-                    if (extract_feature_from_mobilenet(current_feature, FEATURE_VEC_SIZE)) {
-                        float similarity = cosine_similarity(g_top_feature, current_feature, FEATURE_VEC_SIZE);
-                        char msg[128];
-                        snprintf(msg, sizeof(msg), "TOP similarity: %.4f ", similarity);
-                        
-                        if (similarity >= COSINE_THRESHOLD) {
-                            strcat(msg, "[MATCH]\r\n");
-                        } else {
-                            strcat(msg, "[NO MATCH]\r\n");
-                        }
-                        uart_write_bytes(UART_NUM, (const char *)msg, strlen(msg));
-                        ESP_LOGI(TAG, "Top view similarity: %.4f", similarity);
-                    } else {
-                        uart_write_bytes(UART_NUM, (const char *)"TOP capture failed\r\n", 21);
-                    }
-                }
-                break;
-                
-            case 'p':
-            case 'P':
-                // 手动关闭摄像头(节能)
-                ESP_LOGI(TAG, "Manual camera power off requested");
-                camera_power_off();
-                break;
-                
-            case 'w':
-            case 'W':
-                // 手动唤醒摄像头
-                if (g_camera_state != CAM_STATE_READY) {
-                    uart_write_bytes(UART_NUM, (const char *)"System not ready. Please input MAC first\r\n", 42);
+            }
+        } else {
+            // 普通模式下的单视图拍摄
+            switch (cmd[0]) {
+                case 'f': 
+                    msg.cmd = CMD_CAPTURE_FRONT; 
+                    xQueueSend(xSystemQueue, &msg, portMAX_DELAY); 
                     break;
-                }
-                ESP_LOGI(TAG, "Manual camera wake up requested");
-                camera_power_on();
-                break;
-                
-            case 'r':
-            case 'R':
-                // 重置状态，重新输入MAC地址
-                g_camera_state = CAM_STATE_WAITING_MAC;
-                g_view_state = VIEW_NONE;
-                memset(g_current_mac, 0, sizeof(g_current_mac));
-                memset(g_front_feature, 0, sizeof(g_front_feature));
-                memset(g_side_feature, 0, sizeof(g_side_feature));
-                memset(g_top_feature, 0, sizeof(g_top_feature));
-                
-                // 关闭摄像头
-                if (g_camera_power_on) {
-                    camera_power_off();
-                }
-                
-                ESP_LOGI(TAG, "System reset (Storage remains active)");
-                
-                uart_write_bytes(UART_NUM, (const char *)"=== System Reset ===\r\n", 23);
-                uart_write_bytes(UART_NUM, (const char *)"Please input MAC address (format: XX:XX:XX:XX:XX:XX):\r\n", 58);
-                break;
-                
-            default:
-                uart_write_bytes(UART_NUM, (const char *)"Unknown command\r\n", 17);
-                break;
+                case 's': 
+                    msg.cmd = CMD_CAPTURE_SIDE; 
+                    xQueueSend(xSystemQueue, &msg, portMAX_DELAY); 
+                    break;
+                case 't': 
+                    msg.cmd = CMD_CAPTURE_TOP; 
+                    xQueueSend(xSystemQueue, &msg, portMAX_DELAY); 
+                    break;
+                case 'c':
+                case 'C':
+                    msg.cmd = CMD_START_INVENTORY;
+                    xQueueSend(xSystemQueue, &msg, portMAX_DELAY);
+                    break;
+            }
         }
     }
 }
@@ -659,7 +338,7 @@ static void handle_uart_command(const char *cmd_str)
 static void uart_task(void *pvParameters)
 {
     // 注册当前任务到看门狗监控列表
-    SAFE_WDT_ADD();
+    esp_task_wdt_add(NULL);
     
     uint8_t *data = (uint8_t *) malloc(UART_BUF_SIZE);
     char line_buf[128] = {0};
@@ -675,6 +354,7 @@ static void uart_task(void *pvParameters)
                 if (ch == '\r' || ch == '\n') {
                     if (line_pos > 0) {
                         line_buf[line_pos] = '\0';
+                        ESP_LOGI(TAG, "Received command: %s", line_buf); // 调试日志
                         handle_uart_command(line_buf);
                         line_pos = 0;
                         memset(line_buf, 0, sizeof(line_buf));
@@ -696,6 +376,237 @@ static void uart_task(void *pvParameters)
     vTaskDelete(NULL);
 }
 
+// ========== AI任务：独立处理摄像头和推理 ==========
+static void camera_ai_task(void *pvParameters)
+{
+    // 注册当前任务到看门狗监控列表
+    esp_task_wdt_add(NULL);
+    
+    system_msg_t msg;
+    
+    while (1) {
+        // 使用超时接收，防止任务长期阻塞导致看门狗触发
+        if (xQueueReceive(xSystemQueue, &msg, pdMS_TO_TICKS(2000))) {
+            SAFE_WDT_RESET();
+            
+            switch (msg.cmd) {
+                case CMD_INIT_CAMERA:
+                    if (camera_module_init()) {
+                        g_camera_ready = true;
+                        g_camera_power_on = true;
+                        uart_write_bytes(UART_NUM, (const char *)"Camera powered ON\r\n", 20);
+                    }
+                    break;
+
+                case CMD_CAPTURE_FRONT:
+                case CMD_CAPTURE_SIDE:
+                case CMD_CAPTURE_TOP:
+                    if (!g_camera_ready) {
+                        uart_write_bytes(UART_NUM, (const char *)"Camera not ready!\r\n", 20);
+                        break;
+                    }
+                    
+                    // 在开始特征提取前喂狗
+                    SAFE_WDT_RESET();
+                    
+                    float *feature_vec = (float *)malloc(FEATURE_VEC_SIZE * sizeof(float));
+                    if (feature_vec && camera_module_capture_and_process(feature_vec, FEATURE_VEC_SIZE)) {
+                        // 特征提取完成后立即喂狗
+                        SAFE_WDT_RESET();
+                        // 计算当前视图的置信度（使用特征向量的范数作为简单置信度指标）
+                        float norm = 0.0f;
+                        for (int i = 0; i < FEATURE_VEC_SIZE; i++) {
+                            norm += feature_vec[i] * feature_vec[i];
+                        }
+                        norm = sqrtf(norm);
+                        
+                        // 计算完成后喂狗
+                        SAFE_WDT_RESET();
+                        
+                        if (msg.cmd == CMD_CAPTURE_FRONT) {
+                            memcpy(g_front_feature, feature_vec, sizeof(g_front_feature));
+                            g_inventory_confidence[0] = norm;
+                            ESP_LOGI(TAG, "Front view captured, confidence: %.4f", norm);
+                            
+                            // 如果在盘点模式下，更新状态并引导下一步
+                            if (g_inventory_state == INVENTORY_WAITING_FRONT) {
+                                g_inventory_state = INVENTORY_WAITING_SIDE;
+                                uart_write_bytes(UART_NUM, (const char *)"\r\n[STEP 2/3] Please capture SIDE view\r\n", 38);
+                                uart_write_bytes(UART_NUM, (const char *)"         Send 's' to capture\r\n", 29);
+                            }
+                        }
+                        if (msg.cmd == CMD_CAPTURE_SIDE) {
+                            memcpy(g_side_feature, feature_vec, sizeof(g_side_feature));
+                            g_inventory_confidence[1] = norm;
+                            ESP_LOGI(TAG, "Side view captured, confidence: %.4f", norm);
+                            
+                            // 如果在盘点模式下，更新状态并引导下一步
+                            if (g_inventory_state == INVENTORY_WAITING_SIDE) {
+                                g_inventory_state = INVENTORY_WAITING_TOP;
+                                uart_write_bytes(UART_NUM, (const char *)"\r\n[STEP 3/3] Please capture TOP view\r\n", 38);
+                                uart_write_bytes(UART_NUM, (const char *)"         Send 't' to capture and analyze\r\n", 42);
+                            }
+                        }
+                        if (msg.cmd == CMD_CAPTURE_TOP) {
+                            memcpy(g_top_feature, feature_vec, sizeof(g_top_feature));
+                            g_inventory_confidence[2] = norm;
+                            ESP_LOGI(TAG, "Top view captured, confidence: %.4f", norm);
+                            
+                            // 如果在盘点模式下，触发分析
+                            if (g_inventory_state == INVENTORY_WAITING_TOP) {
+                                g_inventory_state = INVENTORY_ANALYZING;
+                                
+                                // 执行加权综合判断
+                                uart_write_bytes(UART_NUM, (const char *)"\r\n[ANALYZING] Computing weighted confidence...\r\n", 46);
+                                
+                                // 计算加权综合置信度
+                                const float weights[3] = {0.5f, 0.3f, 0.2f}; // 正面、侧面、顶部
+                                float weighted_confidence = 0.0f;
+                                float total_weight = 0.0f;
+                                
+                                for (int i = 0; i < 3; i++) {
+                                    if (g_inventory_confidence[i] > 0) {
+                                        weighted_confidence += g_inventory_confidence[i] * weights[i];
+                                        total_weight += weights[i];
+                                    }
+                                }
+                                
+                                if (total_weight > 0) {
+                                    weighted_confidence /= total_weight;
+                                }
+                                
+                                ESP_LOGI(TAG, "Inventory Analysis Result:");
+                                ESP_LOGI(TAG, "  Front confidence: %.4f (weight: %.1f)", g_inventory_confidence[0], weights[0]);
+                                ESP_LOGI(TAG, "  Side confidence:  %.4f (weight: %.1f)", g_inventory_confidence[1], weights[1]);
+                                ESP_LOGI(TAG, "  Top confidence:   %.4f (weight: %.1f)", g_inventory_confidence[2], weights[2]);
+                                ESP_LOGI(TAG, "  Weighted综合置信度: %.4f", weighted_confidence);
+                                
+                                char result_msg[256];
+                                snprintf(result_msg, sizeof(result_msg), 
+                                         "\r\n========== INVENTORY RESULT ==========\r\n"
+                                         "  Front: %.2f (×0.5)\r\n"
+                                         "  Side:  %.2f (×0.3)\r\n"
+                                         "  Top:   %.2f (×0.2)\r\n"
+                                         "  ----------------------------------------\r\n"
+                                         "  Weighted Confidence: %.4f\r\n"
+                                         "  MAC: %s\r\n"
+                                         "========================================\r\n",
+                                         g_inventory_confidence[0], 
+                                         g_inventory_confidence[1],
+                                         g_inventory_confidence[2],
+                                         weighted_confidence,
+                                         msg.mac);
+                                uart_write_bytes(UART_NUM, (const char *)result_msg, strlen(result_msg));
+                                
+                                // 保存资产到SD卡
+                                system_msg_t save_msg = {0};
+                                save_msg.cmd = CMD_SAVE_ASSET;
+                                strncpy(save_msg.mac, msg.mac, MAC_ADDR_LEN);
+                                
+                                asset_record_t *record = (asset_record_t *)malloc(sizeof(asset_record_t));
+                                if (record) {
+                                    strncpy(record->mac_address, msg.mac, MAC_ADDR_LEN);
+                                    memcpy(record->front_feature, g_front_feature, sizeof(g_front_feature));
+                                    memcpy(record->side_feature, g_side_feature, sizeof(g_side_feature));
+                                    memcpy(record->top_feature, g_top_feature, sizeof(g_top_feature));
+                                    record->is_valid = true;
+                                    
+                                    save_msg.data = record;
+                                    xQueueSend(xStorageQueue, &save_msg, portMAX_DELAY);
+                                }
+                                
+                                // 重置盘点状态
+                                g_inventory_state = INVENTORY_IDLE;
+                                memset(g_inventory_confidence, 0, sizeof(g_inventory_confidence));
+                            }
+                        }
+                        
+                        uart_write_bytes(UART_NUM, (const char *)"Feature extracted successfully\r\n", 34);
+                    } else {
+                        uart_write_bytes(UART_NUM, (const char *)"Failed to extract feature\r\n", 28);
+                        if (feature_vec) free(feature_vec);
+                    }
+                    break;
+
+                case CMD_START_INVENTORY:
+                    // 开始盘点模式前喂狗
+                    SAFE_WDT_RESET();
+                    
+                    if (!g_camera_ready) {
+                        uart_write_bytes(UART_NUM, (const char *)"Camera not ready!\r\n", 20);
+                        break;
+                    }
+                    
+                    // 初始化盘点状态
+                    g_inventory_state = INVENTORY_WAITING_FRONT;
+                    memset(g_inventory_confidence, 0, sizeof(g_inventory_confidence));
+                    
+                    ESP_LOGI(TAG, "=== Starting Inventory Mode (Manual Step-by-Step) ===");
+                    uart_write_bytes(UART_NUM, (const char *)"\r\n========== INVENTORY MODE ==========\r\n", 37);
+                    uart_write_bytes(UART_NUM, (const char *)"[STEP 1/3] Please capture FRONT view\r\n", 39);
+                    uart_write_bytes(UART_NUM, (const char *)"         Send 'f' to capture\r\n", 30);
+                    uart_write_bytes(UART_NUM, (const char *)"====================================\r\n", 37);
+                    
+                    break;
+                
+                default:
+                    ESP_LOGW(TAG, "AI task received unknown command: %d", msg.cmd);
+                    break;
+            }
+        } else {
+            // 即使没有收到消息，也要定期喂狗
+            SAFE_WDT_RESET();
+        }
+    }
+}
+
+// ========== 存储任务：独立处理SD卡操作，避免堆竞争 ==========
+static void storage_task(void *pvParameters)
+{
+    // 注册当前任务到看门狗监控列表
+    esp_task_wdt_add(NULL);
+    
+    system_msg_t msg;
+    
+    while (1) {
+        if (xQueueReceive(xStorageQueue, &msg, pdMS_TO_TICKS(2000))) {
+            SAFE_WDT_RESET();
+            
+            switch (msg.cmd) {
+                case CMD_INIT_STORAGE:
+                    if (storage_module_init()) {
+                        g_storage_ready = true;
+                        g_storage_initialized = true;
+                        ESP_LOGI(TAG, "Storage task: SD card ready.");
+                    } else {
+                        g_storage_ready = false;
+                        ESP_LOGE(TAG, "Storage task: SD init failed");
+                    }
+                    break;
+
+                case CMD_SAVE_ASSET:
+                    if (g_storage_ready && msg.data) {
+                        ESP_LOGI(TAG, "Storage task: Saving asset for MAC: %s", msg.mac);
+                        if (storage_module_save_asset((asset_record_t *)msg.data)) {
+                            uart_write_bytes(UART_NUM, (const char *)"✅ Asset saved to SD card\r\n", 29);
+                        } else {
+                            uart_write_bytes(UART_NUM, (const char *)"❌ Failed to save asset\r\n", 27);
+                        }
+                        free(msg.data); 
+                    }
+                    break;
+                
+                default:
+                    ESP_LOGW(TAG, "Storage task received unknown command: %d", msg.cmd);
+                    break;
+            }
+        } else {
+            // 即使没有收到消息，也要定期喂狗
+            SAFE_WDT_RESET();
+        }
+    }
+}
+
 void app_main(void)
 {
     esp_err_t ret = nvs_flash_init();
@@ -705,35 +616,31 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
-    ESP_LOGI(TAG, "=== Initializing ESP32-CAM AI System with MobileNetV2 ===");
+    ESP_LOGI(TAG, "=== Initializing ESP32-CAM AI System ===");
     
     init_uart();
-    ESP_LOGI(TAG, "UART initialized");
     
-    // 注意：此时不初始化摄像头，等待MAC地址输入后再启动
-    
-    // 初始化MobileNetV2模型
-    ESP_LOGI(TAG, "Initializing MobileNetV2 model...");
-    if (mobilenet_init()) {
-        ESP_LOGI(TAG, "MobileNetV2 model initialized successfully");
-    } else {
-        ESP_LOGW(TAG, "Failed to initialize MobileNetV2 model");
-    }
-    
-    // 创建 UART 接收任务（增加栈大小防止溢出）
-    xTaskCreatePinnedToCore(uart_task, "uart_task", 8192, NULL, 10, NULL, 1);
+    // 初始化 AI 模块（模型加载）
+    ai_module_init();
 
-    uart_write_bytes(UART_NUM, (const char *)"\r\n=== ESP32-CAM AI Asset Management System ===\r\n", 50);
-    uart_write_bytes(UART_NUM, (const char *)"Please input MAC address (format: XX:XX:XX:XX:XX:XX):\r\n", 58);
-    uart_write_bytes(UART_NUM, (const char *)"\r\n", 2);
-    uart_write_bytes(UART_NUM, (const char *)"Quick Reference:\r\n", 18);
-    uart_write_bytes(UART_NUM, (const char *)"  Registration: f(front) -> s(side) -> t(top)\r\n", 49);
-    uart_write_bytes(UART_NUM, (const char *)"  Inventory:  c(enter mode) -> 1/2/3(compare)\r\n", 49);
-    uart_write_bytes(UART_NUM, (const char *)"  Power:      p(off) / w(on) - Auto off after registration\r\n", 63);
-    uart_write_bytes(UART_NUM, (const char *)"  Storage:    storage sd/flash/status\r\n", 38);
-    uart_write_bytes(UART_NUM, (const char *)"  Reset:      r - Clear all and restart\r\n", 39);
-    uart_write_bytes(UART_NUM, (const char *)"\r\n", 2);
+    // 创建队列
+    xSystemQueue = xQueueCreate(UART_QUEUE_LEN, sizeof(system_msg_t));
+    xStorageQueue = xQueueCreate(STORAGE_QUEUE_LEN, sizeof(system_msg_t));
 
+    // 创建任务 (优先级: Storage > AI > UART)
+    xTaskCreatePinnedToCore(storage_task, "storage_task", 8192, NULL, 5, NULL, 0);
+    xTaskCreatePinnedToCore(camera_ai_task, "camera_ai_task", 16384, NULL, 4, NULL, 1);
+    xTaskCreatePinnedToCore(uart_task, "uart_task", 4096, NULL, 3, NULL, 1);
+
+    uart_write_bytes(UART_NUM, (const char *)"\r\n[SYSTEM] ESP32-CAM AI System Ready\r\n", 38);
+    uart_write_bytes(UART_NUM, (const char *)"[GUIDE] Please input MAC address (Format: XX:XX:XX:XX:XX:XX)\r\n", 62);
+    uart_write_bytes(UART_NUM, (const char *)"[GUIDE] After initialization:\r\n", 31);
+    uart_write_bytes(UART_NUM, (const char *)"         'f'=Front, 's'=Side, 't'=Top (Manual)\r\n", 47);
+    uart_write_bytes(UART_NUM, (const char *)"         'c'=Inventory Mode (Step-by-step guide)\r\n", 49);
+    uart_write_bytes(UART_NUM, (const char *)"         'l'=List all assets\r\n", 27);
+    uart_write_bytes(UART_NUM, (const char *)"         'i'=System info\r\n", 23);
+    uart_write_bytes(UART_NUM, (const char *)"         'help'/'?': Show help\r\n", 28);
+    
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(10000));
     }

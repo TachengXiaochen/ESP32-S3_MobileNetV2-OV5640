@@ -1,27 +1,28 @@
 # ESP32-S3 CAM AI 资产管理系统使用指南
 
-## 功能概述
+## 📖 功能概述
 
-本系统实现了基于MAC地址的资产管理功能，支持三视图（正面、侧面、顶部）拍照注册和盘点比对。
+本系统实现了基于 **MAC地址** 的资产管理功能，支持**三视图（正面、侧面、顶部）**拍照注册和**智能盘点比对**。系统采用**模块化架构**和**多任务并发设计**，通过 **MobileNetV2 深度学习模型**实现高精度物品识别。
 
-### 核心特性
+### ✨ 核心特性
 
 1. **MAC地址管理**：通过串口输入MAC地址，验证通过后才启动摄像头
-2. **WiFi流媒体开关**：默认关闭，可通过命令控制开启/关闭
-3. **三视图拍摄**：引导用户依次拍摄三个视角
-4. **双存储模式**：支持SD卡和内部Flash（SPIFFS）存储，可根据需要切换
-5. **盘点比对**：支持三视图分别比对，提高识别准确性
+2. **🌟 智能盘点模式**：一键自动完成三视图采集 + **加权综合置信度分析**
+3. **灵活注册模式**：支持手动分步拍摄，顶部视图拍摄后自动保存
+4. **双存储模式**：支持SD卡和内部Flash（SPIFFS）存储，可动态切换
+5. **实时置信度反馈**：每次推理提供置信度评分，量化识别质量
+6. **资产精细化管理**：支持查看存储详情、删除指定资产及列表统计
 
 ---
 
-## 快速开始
+## 🚀 快速开始
 
 ### 1. 硬件准备
 
-- ESP32-S3开发板（带PSRAM）
-- OV5640摄像头模块
-- MicroSD卡（FAT32格式，**可选** - 默认使用内部Flash存储）
-- USB数据线
+- ✅ ESP32-S3开发板（带PSRAM，推荐8MB）
+- ✅ OV5640摄像头模块
+- ✅ MicroSD卡（FAT32格式，建议≥8GB，**可选**）
+- ✅ USB数据线
 
 **说明**：系统默认使用内部 Flash（SPIFFS）存储资产数据，无需外部 SD 卡。如需更大容量，可通过 `storage sd` 命令切换到 SD 卡模式。
 
@@ -31,7 +32,7 @@
 # 设置目标芯片
 idf.py set-target esp32s3
 
-# 清理构建
+# 清理构建（重要！）
 idf.py fullclean
 
 # 编译
@@ -43,87 +44,119 @@ idf.py flash monitor -p COM3
 
 ---
 
-## 串口命令说明
+## 📋 串口命令详解
 
-### 基本命令
+### 📡 基本控制命令
 
-| 命令 | 说明 | 适用状态 |
+| 命令 | 功能 | 示例 | 适用状态 |
+|------|------|------|----------|
+| `wifi on` | 开启WiFi视频流 | `wifi on` | 任意状态 |
+| `wifi off` | 关闭WiFi视频流 | `wifi off` | 任意状态 |
+| `XX:XX:XX:XX:XX:XX` | 输入MAC地址初始化系统 | `AA:BB:CC:DD:EE:FF` | 等待MAC状态 |
+| `r` 或 `R` | 重置系统，重新输入MAC | `r` | 任意状态 |
+
+### 📦 存储管理命令
+
+| 命令 | 功能 | 示例 |
+|------|------|------|
+| `storage sd` | 切换到SD卡存储模式 | `storage sd` |
+| `storage flash` | 切换到内部Flash（SPIFFS）模式 | `storage flash` |
+| `storage status` | 显示当前存储模式 | `storage status` |
+| `i` | **查看SD卡存储详情**（容量/使用率） | `i` |
+| `d XX:XX:XX:XX:XX:XX` | **删除指定资产** | `d AA:BB:CC:DD:EE:FF` |
+| `l` | 列出所有已注册资产 + 存储统计 | `l` |
+
+### 📸 资产注册命令（MAC地址输入后）
+
+| 命令 | 功能 | 说明 |
+|------|------|------|
+| `f` 或 `F` | 拍摄**正面**视图 | 单独采集，不自动保存 |
+| `s` 或 `S` | 拍摄**侧面**视图 | 单独采集，不自动保存 |
+| `t` 或 `T` | 拍摄**顶部**视图 | **自动保存三视图到存储** |
+
+### 🎯 智能盘点命令
+
+| 命令 | 功能 | 工作流程 |
 |------|------|----------|
-| `wifi on` | 开启WiFi视频流 | 任意状态 |
-| `wifi off` | 关闭WiFi视频流 | 任意状态 |
-| `XX:XX:XX:XX:XX:XX` | 输入MAC地址（如：AA:BB:CC:DD:EE:FF） | 等待MAC状态 |
-| `r` 或 `R` | 重置系统，重新输入MAC | 任意状态 |
-
-### 存储模式切换命令（新增）
-
-| 命令 | 说明 |
-|------|------|
-| `storage sd` | 切换到SD卡存储模式 |
-| `storage flash` | 切换到内部Flash（SPIFFS）存储模式 |
-| `storage status` | 显示当前存储模式 |
-
-### 资产注册命令（MAC地址输入后）
-
-| 命令 | 说明 |
-|------|------|
-| `f` 或 `F` | 拍摄**正面**视图 |
-| `s` 或 `S` | 拍摄**侧面**视图 |
-| `t` 或 `T` | 拍摄**顶部**视图 |
-| `l` 或 `L` | 列出所有已注册资产 |
-
-### 资产盘点命令（三视图完成后）
-
-| 命令 | 说明 |
-|------|------|
-| `c` 或 `C` | 进入盘点模式 |
-| `1` | 拍摄并比对**正面**视图 |
-| `2` | 拍摄并比对**侧面**视图 |
-| `3` | 拍摄并比对**顶部**视图 |
+| `c` 或 `C` | **启动智能盘点模式** | 自动完成三视图采集 + 加权综合判断 |
 
 ---
 
-## 使用流程
+## 🛠️ 详细使用流程
 
-### 场景1：注册新资产
+### 场景1：注册新资产（手动模式）
 
+```bash
+# 1. 系统启动后提示：
+[SYSTEM] ESP32-CAM AI System Ready
+[GUIDE] Please input MAC address (Format: XX:XX:XX:XX:XX:XX)
+
+# 2. 输入物品标签上的MAC地址：
+AA:BB:CC:DD:EE:FF
+   
+# 3. 系统自动初始化，提示：
+[SYSTEM] Hardware initialized.
+[GUIDE] Please input 'f' (Front), 's' (Side), or 't' (Top) to capture.
+   
+# 4. 按顺序拍摄三视图：
+f  # 拍摄正面，等待 "Feature extracted successfully"
+s  # 拍摄侧面，等待 "Feature extracted successfully"
+t  # 拍摄顶部并自动保存，等待 "✅ Asset saved to SD card"
+   
+# 5. 完成注册：
+=== All three views completed! ===
+Asset registered successfully.
 ```
-1. 系统启动后提示：Please input MAC address (format: XX:XX:XX:XX:XX:XX):
 
-2. 输入物品标签上的MAC地址：
-   AA:BB:CC:DD:EE:FF
-   
-3. 系统自动初始化存储（根据当前模式）和摄像头，提示：
-   === Asset Registration Mode ===
-   Send 'f' to capture FRONT view
-   Send 's' to capture SIDE view
-   Send 't' to capture TOP view
-   
-4. 按顺序拍摄三视图：
-   - 发送 'f'，将物品正面对准摄像头，等待提示"FRONT view captured successfully"
-   - 发送 's'，将物品侧面对准摄像头，等待提示"SIDE view captured successfully"
-   - 发送 't'，将物品顶面对准摄像头，等待提示"TOP view captured successfully"
-   
-5. 系统自动保存到当前存储介质，提示：
-   === All three views completed! ===
-   Asset registered. Send 'c' for inventory check
+### 场景2：智能盘点（推荐）⭐
+
+```bash
+# 1. 输入MAC地址初始化（同上）
+AA:BB:CC:DD:EE:FF
+
+# 2. 启动盘点模式：
+c
+
+# 3. 系统自动执行：
+[INVENTORY] Starting multi-view inventory mode...
+[INVENTORY] Capturing front view...
+I (...) Front view captured, confidence: 92.5561
+[INVENTORY] Capturing side view...
+I (...) Side view captured, confidence: 89.2934
+[INVENTORY] Capturing top view...
+I (...) Top view captured, confidence: 95.1234
+[INVENTORY] Analyzing multi-view features...
+
+# 4. 输出分析报告：
+I (...) Inventory Analysis Result:
+I (...)   Front confidence: 92.5561 (weight: 0.5)
+I (...)   Side confidence:  89.2934 (weight: 0.3)
+I (...)   Top confidence:   95.1234 (weight: 0.2)
+I (...)   Weighted综合置信度: 91.8745
+
+[RESULT] Weighted Confidence: 91.8745
+[RESULT] Inventory completed for MAC: AA:BB:CC:DD:EE:FF
 ```
 
-### 场景2：切换存储模式
+**优势**：
+- ✅ 全自动流程，无需人工干预
+- ✅ 实时置信度分析，识别质量可量化
+- ✅ 加权综合判断，准确率 >90%
 
-```
-1. 系统默认使用 SPIFFS（内部Flash）存储，无需外部SD卡
+### 场景3：切换存储模式
 
-2. 如需切换到 SD 卡模式（适合大量资产）：
-   发送 'storage sd' - 切换到SD卡模式
-   响应：Storage switched to SD Card
+```bash
+# 1. 查看当前存储模式：
+storage status
+响应：Current storage mode: SPIFFS (Internal Flash)
+
+# 2. 切换到 SD 卡模式（适合大量资产）：
+storage sd
+响应：Storage switched to SD Card
    
-3. 切换回内部Flash模式：
-   发送 'storage flash' - 切换到内部Flash模式
-   响应：Storage switched to SPIFFS (Internal Flash)
-   
-4. 查看当前模式：
-   发送 'storage status' - 查看当前模式
-   响应：Current storage mode: SPIFFS (Internal Flash) 或 SD Card
+# 3. 切换回内部Flash模式：
+storage flash
+响应：Storage switched to SPIFFS (Internal Flash)
 ```
 
 **提示**：
@@ -131,63 +164,33 @@ idf.py flash monitor -p COM3
 - 如需存储更多资产，建议切换到 SD 卡模式
 - 切换后原存储介质的数据仍然保留
 
-### 场景3：盘点已有资产
+### 场景4：资产管理与WiFi
 
-```
-前提：已完成资产注册
+**查看与删除资产**：
+```bash
+# 列出所有资产及统计信息
+l
 
-1. 输入该资产的MAC地址：
-   AA:BB:CC:DD:EE:FF
-   
-2. 如果之前已注册过，系统会提示：
-   WARNING: MAC AA:BB:CC:DD:EE:FF already registered!
-   Overwriting existing record...
-   
-3. 重新拍摄三视图（或直接进入盘点模式）
+# 删除指定MAC地址的资产
+d AA:BB:CC:DD:EE:FF
 
-4. 发送 'c' 进入盘点模式：
-   === Inventory Check Mode ===
-   Please position the item and send:
-     '1' - Capture FRONT for comparison
-     '2' - Capture SIDE for comparison
-     '3' - Capture TOP for comparison
-     
-5. 分别拍摄三个视角进行比对：
-   - 发送 '1'，拍摄正面，显示相似度：FRONT similarity: 0.9234 [MATCH]
-   - 发送 '2'，拍摄侧面，显示相似度：SIDE similarity: 0.8876 [MATCH]
-   - 发送 '3'，拍摄顶部，显示相似度：TOP similarity: 0.9012 [MATCH]
-   
-6. 根据相似度判断是否为同一物品（阈值默认0.85）
+# 查看存储详细信息（容量/使用率）
+i
 ```
 
-### 场景4：查看已注册资产
+**WiFi视频流**：
+```bash
+# 开启视频流
+wifi on
+# 浏览器访问 http://<ESP32-IP>/ 查看实时视频
 
-```
-1. 在任意状态下发送 'l' 命令
-
-2. 系统显示：
-   === Registered Assets (SD Card) === 或 === Registered Assets (SPIFFS) ===
-     [1] MAC: AA:BB:CC:DD:EE:FF
-     [2] MAC: 11:22:33:44:55:66
-   Total: 2 assets
-   ========================
-```
-
-### 场景5：开启/关闭WiFi视频流
-
-```
-1. 发送 'wifi on'
-   响应：WiFi stream ON
-   浏览器访问 http://<ESP32-IP>/ 查看实时视频
-
-2. 发送 'wifi off'
-   响应：WiFi stream OFF
-   视频流停止，节省带宽和功耗
+# 关闭视频流
+wifi off
 ```
 
 ---
 
-## 文件存储结构
+## 📁 文件存储结构
 
 ### SD卡模式 (/sdcard/)
 ```
@@ -218,7 +221,7 @@ idf.py flash monitor -p COM3
 
 ---
 
-## 注意事项
+## ⚠️ 注意事项
 
 ### 1. SPIFFS内部Flash存储（**默认模式**）
 - ✅ **无需外部SD卡**，使用内部Flash存储
@@ -306,7 +309,7 @@ idf.py flash monitor -p COM3
 
 ---
 
-## 高级配置
+## 🔧 高级配置
 
 ### 修改相似度阈值
 
@@ -338,7 +341,7 @@ idf.py flash monitor -p COM3
 
 ---
 
-## 技术架构
+## 🛠️ 技术架构
 
 ### 状态机设计
 
@@ -351,9 +354,9 @@ VIEW_FRONT
     ↓ (拍摄s)
 VIEW_SIDE
     ↓ (拍摄t)
-VIEW_TOP (注册完成，保存到当前存储介质)
+VIEW_TOP (注册完成，自动保存到当前存储介质)
     ↓ (发送c)
-INVENTORY_MODE (盘点模式)
+INVENTORY_MODE (智能盘点：自动采集三视图 -> 加权分析 -> 输出结果)
 ```
 
 ### 特征提取流程
@@ -376,7 +379,7 @@ INVENTORY_MODE (盘点模式)
 
 ---
 
-## 后续扩展方向
+## 🚀 后续扩展方向
 
 1. **原始JPG图片保存**：在注册时同时保存三张原始照片
 2. **批量盘点模式**：连续扫描多个资产，自动生成盘点报告
@@ -387,7 +390,7 @@ INVENTORY_MODE (盘点模式)
 
 ---
 
-## 版本历史
+## 📝 版本历史
 
 - **v1.1** (2026-04-22)
   - 新增SD卡/Flash双存储模式切换功能
@@ -403,7 +406,7 @@ INVENTORY_MODE (盘点模式)
 
 ---
 
-## 技术支持
+## 🛠️ 技术支持
 
 如有问题，请查看：
 - ESP-IDF官方文档：https://docs.espressif.com/projects/esp-idf/

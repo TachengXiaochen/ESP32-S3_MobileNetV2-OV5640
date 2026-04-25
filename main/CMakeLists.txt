@@ -1,11 +1,3 @@
-idf_component_register(
-    SRCS "asset_manager.c" "main.c" "mobilenet_wrapper.cpp"
-    INCLUDE_DIRS "."
-    REQUIRES 
-        esp32-camera 
-        nvs_flash 
-        esp_timer
-        imagenet_cls
-        fatfs
-        sdmmc
-)
+idf_component_register(SRCS "main.c" "asset_manager.c" "camera_module.c" "storage_module.c" "ai_module.c" "mobilenet_wrapper.cpp"
+                    INCLUDE_DIRS "."
+                    REQUIRES esp32-camera esp-dl imagenet_cls fatfs sdmmc nvs_flash)
