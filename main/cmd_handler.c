@@ -78,6 +78,7 @@ void cmd_handler_show_help(void)
         "  MAC地址: AA:BB:CC:DD:EE:FF\r\n"
         "  f/s/t: 拍摄正/侧/顶视图\r\n"
         "  c: 进入盘点引导模式\r\n"
+        "  d: 进入删除资产模式\r\n"
         "  p XX:XX:XX:XX:XX:XX: 指定MAC盘点\r\n"
         "  l: 列出所有资产\r\n"
         "  i: 显示系统信息\r\n"
@@ -96,6 +97,7 @@ void show_main_menu(void)
         "\r\n========== MAIN MENU ==========\r\n"
         "  r - Register new asset\r\n"
         "  c - Inventory existing asset\r\n"
+        "  d - Delete asset\r\n"
         "  l - List all assets\r\n"
         "  i - System information\r\n"
         "  help/? - Show this menu\r\n"
@@ -130,6 +132,29 @@ static void show_inventory_mode_guide(void)
         "  Format: XX:XX:XX:XX:XX:XX\r\n"
         "  Example: AA:BB:CC:DD:EE:FF\r\n"
         "======================================\r\n"
+        "[GUIDE] Input MAC address: ";
+    uart_write_bytes(UART_NUM_0, guide, strlen(guide));
+}
+
+/**
+ * @brief 显示删除模式引导（输入d后）
+ */
+static void show_delete_mode_guide(void)
+{
+    // ✅ 先显示当前资产列表(不带标题,因为asset_list_uart内部已有标题)
+    extern void asset_list_uart(void);
+    asset_list_uart();
+    
+    // 添加分隔线,使界面更清晰
+    uart_write_bytes(UART_NUM_0, "\r\n", 2);
+    
+    // 再显示删除模式引导
+    const char *guide = 
+        "========== DELETE MODE ==========\r\n"
+        "  Please input MAC address to delete:\r\n"
+        "  Format: XX:XX:XX:XX:XX:XX\r\n"
+        "  Example: AA:BB:CC:DD:EE:FF\r\n"
+        "===================================\r\n"
         "[GUIDE] Input MAC address: ";
     uart_write_bytes(UART_NUM_0, guide, strlen(guide));
 }
@@ -317,8 +342,8 @@ static void handle_info_command(const char *cmd)
  */
 static void handle_mac_initialization(const char *mac)
 {
-    strncpy(g_current_mac, mac, MAC_ADDR_LEN);
-    g_current_mac[MAC_ADDR_LEN] = '\0';
+    // ✅ 修复：使用MAC_ADDR_LEN + 1代替sizeof，避免不完整类型问题
+    snprintf(g_current_mac, MAC_ADDR_LEN + 1, "%s", mac);
     
     ESP_LOGI(TAG, "MAC address received: %s", mac);
     uart_write_bytes(UART_NUM_0, "\r\n[SYSTEM] Initializing hardware...\r\n", 37);
@@ -338,7 +363,7 @@ static void handle_mac_initialization(const char *mac)
     // 2. 发送初始化摄像头指令
     system_msg_t init_camera_msg = {0};
     init_camera_msg.cmd = CMD_INIT_CAMERA;
-    strncpy(init_camera_msg.mac, mac, MAC_ADDR_LEN);
+    snprintf(init_camera_msg.mac, sizeof(init_camera_msg.mac), "%s", mac);
     xQueueSend(xSystemQueue, &init_camera_msg, portMAX_DELAY);
     
     // 更新状态
@@ -463,7 +488,15 @@ void cmd_handler_process(const char *cmd_line)
             return;
         }
         
-        // 4.3 无效命令
+        // 4.3 删除模式选择
+        if (strcasecmp(cmd_buf, "d") == 0) {
+            ESP_LOGI(TAG, "Entering delete mode");
+            g_camera_state = CAM_STATE_WAITING_DEL_MAC;  // 等待删除MAC
+            show_delete_mode_guide();
+            return;
+        }
+        
+        // 4.4 无效命令
         uart_write_bytes(UART_NUM_0, "[ERROR] Unknown command. Type 'help' for assistance.\r\n", 53);
         return;
     }
@@ -562,14 +595,99 @@ void cmd_handler_process(const char *cmd_line)
         }
     }
     
-    // ========== 7. READY状态下的命令处理 ==========
+    // ========== 7. 等待删除MAC地址状态 ==========
+    if (g_camera_state == CAM_STATE_WAITING_DEL_MAC) {
+        if (cmd_handler_validate_mac(cmd_buf)) {
+            // 检查该MAC是否已注册
+            asset_record_t *record = (asset_record_t *)malloc(sizeof(asset_record_t));
+            if (!record) {
+                uart_write_bytes(UART_NUM_0, "[ERROR] Memory allocation failed\r\n", 33);
+                g_camera_state = CAM_STATE_WAITING_MAC;
+                show_main_menu();
+                return;
+            }
+            
+            esp_err_t ret = asset_load(cmd_buf, record);
+            if (ret == ESP_OK) {
+                // 资产存在，确认删除
+                char confirm_msg[256];
+                snprintf(confirm_msg, sizeof(confirm_msg),
+                         "\r\n⚠️  CONFIRM DELETE ASSET?\r\n"
+                         "  MAC: %s\r\n"
+                         "  Press 'y' to confirm, any other key to cancel: ",
+                         cmd_buf);
+                uart_write_bytes(UART_NUM_0, confirm_msg, strlen(confirm_msg));
+                
+                // 保存MAC地址用于后续确认
+                snprintf(g_current_mac, MAC_ADDR_LEN + 1, "%s", cmd_buf);
+                
+                // 设置状态为等待确认
+                g_camera_state = CAM_STATE_WAITING_DEL_CONFIRM;
+                
+                free(record);
+                return;
+            } else {
+                // 资产不存在
+                uart_write_bytes(UART_NUM_0, "\r\n❌ ASSET NOT FOUND\r\n", 24);
+                uart_write_bytes(UART_NUM_0, "Asset with MAC ", 15);
+                uart_write_bytes(UART_NUM_0, cmd_buf, strlen(cmd_buf));
+                uart_write_bytes(UART_NUM_0, " does not exist.\r\n\r\n", 21);
+                
+                // 重置状态并返回主菜单
+                g_camera_state = CAM_STATE_WAITING_MAC;
+                show_main_menu();
+                free(record);
+                return;
+            }
+        } else {
+            uart_write_bytes(UART_NUM_0, "[ERROR] Invalid MAC address format.\r\n", 37);
+            uart_write_bytes(UART_NUM_0, "Expected format: XX:XX:XX:XX:XX:XX\r\n", 37);
+            uart_write_bytes(UART_NUM_0, "Example: AA:BB:CC:DD:EE:FF\r\n", 29);
+            uart_write_bytes(UART_NUM_0, "[GUIDE] Input MAC address: ", 27);
+            return;
+        }
+    }
+    
+    // ========== 8. 等待删除确认状态 ==========
+    if (g_camera_state == CAM_STATE_WAITING_DEL_CONFIRM) {
+        if (strcasecmp(cmd_buf, "y") == 0) {
+            // 用户确认删除，执行删除操作
+            extern esp_err_t asset_delete(const char *mac);
+            esp_err_t ret = asset_delete(g_current_mac);
+            if (ret == ESP_OK) {
+                uart_write_bytes(UART_NUM_0, "\r\n✅ ASSET DELETED SUCCESSFULLY!\r\n", 35);
+                uart_write_bytes(UART_NUM_0, "Asset with MAC ", 15);
+                uart_write_bytes(UART_NUM_0, g_current_mac, strlen(g_current_mac));
+                uart_write_bytes(UART_NUM_0, " has been removed.\r\n\r\n", 24);
+                
+                // ✅ 删除成功后显示更新后的资产列表
+                extern void asset_list_uart(void);
+                asset_list_uart();
+            } else {
+                uart_write_bytes(UART_NUM_0, "\r\n❌ FAILED TO DELETE ASSET\r\n", 27);
+                uart_write_bytes(UART_NUM_0, "An error occurred during deletion.\r\n\r\n", 39);
+            }
+        } else {
+            // 用户取消删除
+            uart_write_bytes(UART_NUM_0, "\r\n❌ DELETION CANCELLED\r\n", 25);
+            uart_write_bytes(UART_NUM_0, "Asset was not deleted.\r\n\r\n", 28);
+        }
+        
+        // 重置状态并返回主菜单
+        g_camera_state = CAM_STATE_WAITING_MAC;
+        show_main_menu();
+        return;
+    }
+    
+    // ========== 8. READY状态下的命令处理 ==========
     if (g_camera_state == CAM_STATE_READY) {
         // 7.1 拍摄命令（f/s/t）
         if (strlen(cmd_buf) == 1) {
             char view_cmd = tolower(cmd_buf[0]);
             
             system_msg_t msg = {0};
-            strncpy(msg.mac, g_current_mac, MAC_ADDR_LEN);
+            // ✅ 修复：使用snprintf确保MAC地址字符串正确终止
+            snprintf(msg.mac, sizeof(msg.mac), "%s", g_current_mac);
             
             if (view_cmd == 'f') {
                 msg.cmd = CMD_CAPTURE_FRONT;
@@ -608,7 +726,7 @@ void cmd_handler_process(const char *cmd_line)
         }
     }
     
-    // ========== 8. 未知命令 ==========
+    // ========== 9. 未知命令 ==========
     uart_write_bytes(UART_NUM_0, "[ERROR] Unknown command. Type 'help' for assistance.\r\n", 53);
 }
 

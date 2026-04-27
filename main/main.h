@@ -34,7 +34,9 @@ typedef enum {
     CAM_STATE_WAITING_MAC = 0,      // 主菜单状态，等待模式选择
     CAM_STATE_WAITING_REG_MAC = 1,  // 等待注册MAC地址
     CAM_STATE_WAITING_INV_MAC = 2,  // 等待盘点MAC地址
-    CAM_STATE_READY = 3             // 就绪状态，可以拍摄
+    CAM_STATE_WAITING_DEL_MAC = 3,  // 等待删除MAC地址
+    CAM_STATE_WAITING_DEL_CONFIRM = 4,  // 等待删除确认
+    CAM_STATE_READY = 5             // 就绪状态，可以拍摄
 } camera_state_t;
 
 // 视图状态枚举

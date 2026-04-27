@@ -2,6 +2,8 @@
 #define CAMERA_MODULE_H
 
 #include <stdbool.h>
+#include <stdint.h>
+#include <stddef.h>  // 添加 size_t 类型定义
 
 /**
  * @brief 初始化摄像头硬件
@@ -16,6 +18,14 @@ bool camera_module_init(void);
  * @return true 成功, false 失败
  */
 bool camera_module_capture_and_process(float *feature_out, int feature_size);
+
+/**
+ * @brief 采集原始JPEG图像数据（用于保存）
+ * @param jpeg_buf 输出JPEG数据缓冲区指针
+ * @param jpeg_len 输出JPEG数据长度
+ * @return true 成功, false 失败
+ */
+bool camera_module_capture_jpeg(uint8_t **jpeg_buf, size_t *jpeg_len);
 
 /**
  * @brief 反初始化摄像头硬件（关闭摄像头）

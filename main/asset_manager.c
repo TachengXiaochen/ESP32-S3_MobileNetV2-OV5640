@@ -358,7 +358,7 @@ esp_err_t asset_load(const char *mac_address, asset_record_t *record)
 }
 
 /**
- * @brief 删除资产记录
+ * @brief 删除资产记录及其关联图片
  */
 esp_err_t asset_delete(const char *mac_address)
 {
@@ -371,17 +371,114 @@ esp_err_t asset_delete(const char *mac_address)
         return ESP_ERR_INVALID_ARG;
     }
 
+    ESP_LOGI(TAG, "Deleting asset files for MAC: %s", mac_address);
+    
+    int deleted_count = 0;
+    int failed_count = 0;
     char file_path[128];
-    get_asset_file_path(mac_address, file_path, sizeof(file_path), "dat");
 
-    ESP_LOGI(TAG, "Deleting asset: %s", file_path);
-
-    if (f_unlink(file_path) != 0) {
-        ESP_LOGE(TAG, "Failed to delete asset file: %s", file_path);
-        return ESP_FAIL;
+    // ✅ 调试：先列出assets目录下的所有文件
+    char asset_dir[64];
+    get_current_asset_dir(asset_dir, sizeof(asset_dir));
+    ESP_LOGI(TAG, "Assets directory: %s", asset_dir);
+    
+    DIR *dir = opendir(asset_dir);
+    if (dir) {
+        struct dirent *entry;
+        ESP_LOGI(TAG, "Files in assets directory:");
+        while ((entry = readdir(dir)) != NULL) {
+            if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0) {
+                ESP_LOGI(TAG, "  - %s", entry->d_name);
+            }
+        }
+        closedir(dir);
+    } else {
+        ESP_LOGE(TAG, "Failed to open assets directory!");
     }
 
-    ESP_LOGI(TAG, "Asset deleted successfully");
+    // 1. 删除特征文件 (.dat)
+    get_asset_file_path(mac_address, file_path, sizeof(file_path), "dat");
+
+    ESP_LOGI(TAG, "Attempting to delete feature file: %s", file_path);
+
+    // 检查文件是否存在
+    struct stat st;
+    if (stat(file_path, &st) == 0) {
+        if (remove(file_path) == 0) {
+            ESP_LOGI(TAG, "Deleted feature file: %s", file_path);
+            deleted_count++;
+        } else {
+            ESP_LOGW(TAG, "Feature file delete failed: %s (error: %s)", file_path, strerror(errno));
+            failed_count++;
+        }
+    } else {
+        ESP_LOGW(TAG, "Feature file not found: %s (will continue to delete other files)", file_path);
+        // 文件不存在不算失败，继续删除其他文件
+    }
+    
+    // 准备安全的MAC字符串用于图片路径构建 (将 ':' 替换为 '_')
+    char safe_mac[MAC_ADDR_LEN + 1];
+    strncpy(safe_mac, mac_address, MAC_ADDR_LEN);
+    safe_mac[MAC_ADDR_LEN] = '\0';
+    for (int i = 0; i < strlen(safe_mac); i++) {
+        if (safe_mac[i] == ':') {
+            safe_mac[i] = '_';
+        }
+    }
+
+    get_current_asset_dir(asset_dir, sizeof(asset_dir));
+
+    // 2. 删除正面图片 (front.jpg)
+    snprintf(file_path, sizeof(file_path), "%s/%s_front.jpg", asset_dir, safe_mac);
+
+    if (stat(file_path, &st) == 0) {
+        if (remove(file_path) == 0) {
+            ESP_LOGI(TAG, "Deleted front image: %s", file_path);
+            deleted_count++;
+        } else {
+            ESP_LOGD(TAG, "Front image delete failed: %s (error: %s)", file_path, strerror(errno));
+        }
+    } else {
+        ESP_LOGD(TAG, "Front image not found: %s", file_path);
+    }
+    
+    // 3. 删除侧面图片 (side.jpg)
+    snprintf(file_path, sizeof(file_path), "%s/%s_side.jpg", asset_dir, safe_mac);
+
+    if (stat(file_path, &st) == 0) {
+        if (remove(file_path) == 0) {
+            ESP_LOGI(TAG, "Deleted side image: %s", file_path);
+            deleted_count++;
+        } else {
+            ESP_LOGD(TAG, "Side image delete failed: %s (error: %s)", file_path, strerror(errno));
+        }
+    } else {
+        ESP_LOGD(TAG, "Side image not found: %s", file_path);
+    }
+    
+    // 4. 删除顶部图片 (top.jpg)
+    snprintf(file_path, sizeof(file_path), "%s/%s_top.jpg", asset_dir, safe_mac);
+
+    if (stat(file_path, &st) == 0) {
+        if (remove(file_path) == 0) {
+            ESP_LOGI(TAG, "Deleted top image: %s", file_path);
+            deleted_count++;
+        } else {
+            ESP_LOGD(TAG, "Top image delete failed: %s (error: %s)", file_path, strerror(errno));
+        }
+    } else {
+        ESP_LOGD(TAG, "Top image not found: %s", file_path);
+    }
+    
+    ESP_LOGI(TAG, "Asset deletion completed for %s: %d files deleted, %d failed", 
+             mac_address, deleted_count, failed_count);
+    
+    // 如果至少删除了一个文件，或者所有文件都不存在（视为成功清理），则返回 OK
+    // 只有当尝试删除但发生错误时才增加 failed_count
+    if (failed_count > 0 && deleted_count == 0) {
+        return ESP_FAIL;
+    }
+    
     return ESP_OK;
 }
 
@@ -415,27 +512,35 @@ esp_err_t asset_list_all(int *count)
     uint64_t total_bytes, used_bytes, free_bytes;
     esp_err_t ret = asset_get_storage_info(&total_bytes, &used_bytes, &free_bytes);
     if (ret == ESP_OK) {
+        char info_buf[256];
         float total_mb = (float)total_bytes / (1024.0f * 1024.0f);
         float used_mb = (float)used_bytes / (1024.0f * 1024.0f);
         float free_mb = (float)free_bytes / (1024.0f * 1024.0f);
         float usage_percent = ((float)used_bytes / (float)total_bytes) * 100.0f;
         
-        printf("\n=== Storage Information ===\n");
-        printf("  Total: %.2f MB\n", total_mb);
-        printf("  Used:  %.2f MB (%.1f%%)\n", used_mb, usage_percent);
-        printf("  Free:  %.2f MB (%.1f%%)\n", free_mb, 100.0f - usage_percent);
+        snprintf(info_buf, sizeof(info_buf),
+                 "\r\n=== Storage Information ===\r\n"
+                 "  Total: %.2f MB\r\n"
+                 "  Used:  %.2f MB (%.1f%%)\r\n"
+                 "  Free:  %.2f MB (%.1f%%)\r\n",
+                 total_mb, used_mb, usage_percent, free_mb, 100.0f - usage_percent);
+        uart_write_bytes(UART_NUM_0, info_buf, strlen(info_buf));
         
         // 警告：空间不足
         if (usage_percent > 90.0f) {
-            printf("  ⚠️  WARNING: SD card is almost full!\n");
+            uart_write_bytes(UART_NUM_0, "  ⚠️  WARNING: SD card is almost full!\r\n", 42);
         } else if (usage_percent > 80.0f) {
-            printf("  ⚡ NOTICE: SD card space is running low.\n");
+            uart_write_bytes(UART_NUM_0, "  ⚡ NOTICE: SD card space is running low.\r\n", 44);
         }
-        printf("===========================\n\n");
+        uart_write_bytes(UART_NUM_0, "===========================\r\n\r\n", 31);
     }
 
-    printf("=== Registered Assets (%s) ===\n", 
-           g_current_storage_mode == STORAGE_MODE_SD_CARD ? "SD Card" : "SPIFFS");
+    char header_buf[128];
+    snprintf(header_buf, sizeof(header_buf),
+             "=== Registered Assets (%s) ===\r\n",
+             g_current_storage_mode == STORAGE_MODE_SD_CARD ? "SD Card" : "SPIFFS");
+    uart_write_bytes(UART_NUM_0, header_buf, strlen(header_buf));
+    
     while ((entry = readdir(dir)) != NULL) {
         // 只处理.dat文件
         if (strstr(entry->d_name, ".dat") != NULL) {
@@ -457,14 +562,19 @@ esp_err_t asset_list_all(int *count)
                 }
             }
             
-            printf("  [%d] MAC: %s\n", asset_count + 1, mac_display);
+            char item_buf[64];
+            snprintf(item_buf, sizeof(item_buf), "  [%d] MAC: %s\r\n", asset_count + 1, mac_display);
+            uart_write_bytes(UART_NUM_0, item_buf, strlen(item_buf));
             asset_count++;
         }
     }
     closedir(dir);
 
     *count = asset_count;
-    printf("Total: %d assets\n========================\n\n", asset_count);
+    char summary_buf[128];
+    snprintf(summary_buf, sizeof(summary_buf),
+             "Total: %d assets\r\n========================\r\n\r\n", asset_count);
+    uart_write_bytes(UART_NUM_0, summary_buf, strlen(summary_buf));
     
     return ESP_OK;
 }
@@ -660,18 +770,21 @@ void asset_list_uart(void)
             continue;
         }
 
-        // 只显示.bin文件
+        // ✅ 只显示.dat文件(与asset_save/asset_load保持一致)
         const char *ext = strrchr(entry->d_name, '.');
-        if (ext && strcmp(ext, ".bin") == 0) {
-            // 提取MAC地址（文件名格式: XX_XX_XX_XX_XX_XX.bin）
+        if (ext && strcmp(ext, ".dat") == 0) {
+            // 提取MAC地址（文件名格式: XX_XX_XX_XX_XX_XX.dat）
             char mac_display[32];
             strncpy(mac_display, entry->d_name, sizeof(mac_display) - 1);
             mac_display[sizeof(mac_display) - 1] = '\0';
             
-            // 将下划线替换为冒号
-            for (int i = 0; mac_display[i] != '\0' && mac_display[i] != '.'; i++) {
+            // 将下划线替换为冒号,并移除扩展名
+            for (int i = 0; mac_display[i] != '\0'; i++) {
                 if (mac_display[i] == '_') {
                     mac_display[i] = ':';
+                } else if (mac_display[i] == '.') {
+                    mac_display[i] = '\0';  // 截断字符串,移除.dat扩展名
+                    break;
                 }
             }
             
@@ -687,4 +800,88 @@ void asset_list_uart(void)
     snprintf(summary_buf, sizeof(summary_buf), 
              "Total: %d assets\r\n========================\r\n", count);
     uart_write_bytes(UART_NUM_0, summary_buf, strlen(summary_buf));
+}
+
+/**
+ * @brief 保存资产图片到当前存储介质
+ */
+esp_err_t asset_save_image(const char *mac_address, const char *view_name, 
+                           const uint8_t *jpeg_data, size_t jpeg_len)
+{
+    if (!g_storage_initialized) {
+        ESP_LOGE(TAG, "Storage not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (!mac_address || !view_name || !jpeg_data || jpeg_len == 0) {
+        ESP_LOGE(TAG, "Invalid parameters for saving image");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 生成图片文件路径：/sdcard/assets/MAC_VIEW.jpg
+    char file_path[128];
+    char asset_dir[64];
+    get_current_asset_dir(asset_dir, sizeof(asset_dir));
+
+    // ✅ 将MAC地址中的':'替换为'_'
+    char safe_mac[MAC_ADDR_LEN + 1];
+    strncpy(safe_mac, mac_address, MAC_ADDR_LEN);
+    safe_mac[MAC_ADDR_LEN] = '\0';
+    
+    for (int i = 0; i < strlen(safe_mac); i++) {
+        if (safe_mac[i] == ':') {
+            safe_mac[i] = '_';
+        }
+    }
+    
+    // 生成文件名：AA_BB_CC_DD_EE_FF_front.jpg
+    snprintf(file_path, sizeof(file_path), "%s/%s_%s.jpg", asset_dir, safe_mac, view_name);
+    
+    ESP_LOGI(TAG, "Saving image to: %s (%u bytes)", file_path, (unsigned int)jpeg_len);
+
+    // 【关键修复】在打开文件前，先确保目录存在
+    struct stat st;
+    if (stat(ASSET_DIR_SD, &st) != 0) {
+        ESP_LOGW(TAG, "Assets directory not found, creating: %s", ASSET_DIR_SD);
+        
+        if (stat(MOUNT_POINT_SD, &st) != 0) {
+            ESP_LOGE(TAG, "Mount point %s does not exist!", MOUNT_POINT_SD);
+            return ESP_ERR_INVALID_STATE;
+        }
+        
+        int ret = mkdir(ASSET_DIR_SD, 0755);
+        if (ret != 0) {
+            ESP_LOGE(TAG, "Failed to create directory: %s (errno=%d)", ASSET_DIR_SD, errno);
+            return ESP_FAIL;
+        }
+        ESP_LOGI(TAG, "Directory created successfully");
+    }
+
+    // 检查写入空间
+    esp_err_t space_check = asset_check_write_space(jpeg_len, 10);
+    if (space_check == ESP_ERR_NO_MEM) {
+        ESP_LOGE(TAG, "Cannot save image: SD card is full!");
+        return ESP_ERR_NO_MEM;
+    }
+
+    // 打开文件写入
+    FILE *f = fopen(file_path, "wb");
+    if (!f) {
+        ESP_LOGE(TAG, "Failed to open file for writing: %s", file_path);
+        ESP_LOGE(TAG, "Error code: %d - %s", errno, strerror(errno));
+        return ESP_FAIL;
+    }
+
+    // 写入JPEG数据
+    size_t written = fwrite(jpeg_data, 1, jpeg_len, f);
+    fclose(f);
+
+    if (written != jpeg_len) {
+        ESP_LOGE(TAG, "Failed to write image data (expected %u, wrote %u)", 
+                 (unsigned int)jpeg_len, (unsigned int)written);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Image saved successfully: %s", file_path);
+    return ESP_OK;
 }

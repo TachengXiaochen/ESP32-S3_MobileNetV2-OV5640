@@ -75,7 +75,6 @@ float g_top_feature[FEATURE_VEC_SIZE] = {0};
 
 // 盘点模式状态
 inventory_state_t g_inventory_state = INVENTORY_IDLE;
-static float g_inventory_confidence[3] = {0}; // 三个视图的置信度
 
 char g_current_mac[MAC_ADDR_LEN + 1] = {0};
 camera_state_t g_camera_state = CAM_STATE_WAITING_MAC;
@@ -101,29 +100,34 @@ static void init_uart(void)
     ESP_LOGI(TAG, "UART initialized at %d baud", UART_BAUD_RATE);
 }
 
-// 验证MAC地址格式
-static bool validate_mac_address(const char *mac)
+// 打印系统信息到UART
+void print_system_info_uart(void)
 {
-    if (strlen(mac) != MAC_ADDR_LEN) {
-        return false;
-    }
+    char info_buf[512];
     
-    // 格式: XX:XX:XX:XX:XX:XX
-    for (int i = 0; i < MAC_ADDR_LEN; i++) {
-        if (i == 2 || i == 5 || i == 8 || i == 11 || i == 14) {
-            if (mac[i] != ':') {
-                return false;
-            }
-        } else {
-            if (!((mac[i] >= '0' && mac[i] <= '9') || 
-                  (mac[i] >= 'A' && mac[i] <= 'F') ||
-                  (mac[i] >= 'a' && mac[i] <= 'f'))) {
-                return false;
-            }
-        }
-    }
+    // 获取内存信息
+    const uint32_t free_heap = esp_get_free_heap_size();
+    const uint32_t min_free_heap = esp_get_minimum_free_heap_size();
     
-    return true;
+    snprintf(info_buf, sizeof(info_buf),
+             "\r\n========== SYSTEM INFORMATION ==========\r\n"
+             "  Chip Model:     ESP32-S3\r\n"
+             "  CPU Cores:      2\r\n"
+             "  Free Heap:      %lu bytes\r\n"
+             "  Min Free Heap:  %lu bytes\r\n"
+             "  Camera State:   %s\r\n"
+             "  Storage State:  %s\r\n"
+             "  Current MAC:    %s\r\n"
+             "  Mode:           %s\r\n"
+             "===========================================\r\n",
+             (unsigned long)free_heap,
+             (unsigned long)min_free_heap,
+             g_camera_ready ? "READY" : "NOT READY",
+             g_storage_ready ? "READY" : "NOT READY",
+             strlen(g_current_mac) > 0 ? g_current_mac : "N/A",
+             g_is_inventory_mode ? "INVENTORY" : "REGISTRATION");
+    
+    uart_write_bytes(UART_NUM, (const char *)info_buf, strlen(info_buf));
 }
 
 // UART 接收任务 - 修改为按行读取
@@ -210,27 +214,96 @@ static void camera_ai_task(void *pvParameters)
                     
                     float *feature_ptr = NULL;
                     const char *view_name = NULL;
+                    const char *view_label = NULL;  // 用于图片文件名
                     
                     if (msg.cmd == CMD_CAPTURE_FRONT) {
                         feature_ptr = g_front_feature;
                         view_name = "Front";
+                        view_label = "front";
                         led_capture_front(g_is_inventory_mode);  // ✅ 使用标志位判断模式
                     } else if (msg.cmd == CMD_CAPTURE_SIDE) {
                         feature_ptr = g_side_feature;
                         view_name = "Side";
+                        view_label = "side";
                         led_capture_side(g_is_inventory_mode);   // ✅ 使用标志位判断模式
                     } else {
                         feature_ptr = g_top_feature;
                         view_name = "Top";
+                        view_label = "top";
                         led_capture_top(g_is_inventory_mode);    // ✅ 使用标志位判断模式
                     }
                     
                     // ✅ AI推理前复位看门狗（推理耗时约2-3秒）
                     esp_task_wdt_reset();
                     
-                    if (camera_module_capture_and_process(feature_ptr, FEATURE_VEC_SIZE)) {
-                        char log_msg[64];
-                        snprintf(log_msg, sizeof(log_msg), "%s view captured, confidence: 1.0000\r\n", view_name);
+                    // ✅ 先捕获JPEG图片（仅注册模式需要保存）
+                    uint8_t *jpeg_buf = NULL;
+                    size_t jpeg_len = 0;
+                    bool image_saved = false;
+                    
+                    if (!g_is_inventory_mode && g_storage_ready) {
+                        // 注册模式且存储就绪，捕获并保存图片
+                        if (camera_module_capture_jpeg(&jpeg_buf, &jpeg_len)) {
+                            ESP_LOGI(TAG, "Captured JPEG image: %u bytes", (unsigned int)jpeg_len);
+                            
+                            // 保存图片到SD卡
+                            esp_err_t ret = storage_module_save_image(g_current_mac, view_label, jpeg_buf, jpeg_len);
+                            if (ret == ESP_OK) {
+                                image_saved = true;
+                                ESP_LOGI(TAG, "Image saved successfully");
+                            } else {
+                                ESP_LOGW(TAG, "Failed to save image (err=0x%x), continuing with feature extraction", ret);
+                            }
+                            
+                            // ✅ 释放JPEG缓冲区内存
+                            free(jpeg_buf);
+                            jpeg_buf = NULL;
+                        } else {
+                            ESP_LOGW(TAG, "Failed to capture JPEG image, continuing with feature extraction");
+                        }
+                    }
+                    
+                    // 提取特征向量（✅ 新增：多帧融合）
+                    extern bool feature_processor_add_frame(const float *feature, int feature_size);
+                    extern bool feature_processor_get_fused_feature(float *output, int feature_size);
+                    extern void feature_processor_clear_buffer(void);
+                    
+                    const int NUM_FRAMES = 3;  // 采集3帧进行融合
+                    
+                    // 清空融合缓冲区
+                    feature_processor_clear_buffer();
+                    
+                    // 采集多帧并添加到缓冲区
+                    for (int i = 0; i < NUM_FRAMES; i++) {
+                        float single_frame[FEATURE_VEC_SIZE];
+                        if (camera_module_capture_and_process(single_frame, FEATURE_VEC_SIZE)) {
+                            feature_processor_add_frame(single_frame, FEATURE_VEC_SIZE);
+                            ESP_LOGI(TAG, "Frame %d/%d captured", i + 1, NUM_FRAMES);
+                        } else {
+                            ESP_LOGW(TAG, "Failed to capture frame %d/%d", i + 1, NUM_FRAMES);
+                        }
+                    }
+                    
+                    // 获取融合后的特征
+                    if (feature_processor_get_fused_feature(feature_ptr, FEATURE_VEC_SIZE)) {
+                        ESP_LOGI(TAG, "Multi-frame fusion completed (%d frames)", NUM_FRAMES);
+                    } else {
+                        ESP_LOGW(TAG, "Multi-frame fusion failed");
+                        // 融合失败，但可能已经采集了部分帧，继续处理
+                    }
+                    
+                    // 检查是否至少采集了一帧有效数据
+                    extern int feature_processor_get_frame_count(void);
+                    int frame_count = feature_processor_get_frame_count();
+                    
+                    if (frame_count > 0) {
+                        // 输出拍摄成功日志
+                        char log_msg[128];
+                        if (image_saved) {
+                            snprintf(log_msg, sizeof(log_msg), "%s view captured (with image), confidence: 1.0000\r\n", view_name);
+                        } else {
+                            snprintf(log_msg, sizeof(log_msg), "%s view captured, confidence: 1.0000\r\n", view_name);
+                        }
                         uart_write_bytes(UART_NUM, (const char *)log_msg, strlen(log_msg));
                         
                         // ✅ AI推理后再次复位看门狗
@@ -282,37 +355,40 @@ static void camera_ai_task(void *pvParameters)
                             // 💡 更好的方法：添加一个全局标志位
                             extern bool g_is_inventory_mode;  // 新增标志
                             
+                            // ✅ 调试日志：输出当前模式
+                            ESP_LOGI(TAG, "Current mode: %s (g_is_inventory_mode=%d)", 
+                                     g_is_inventory_mode ? "INVENTORY" : "REGISTRATION", g_is_inventory_mode);
+                            
                             if (g_is_inventory_mode) {
                                 // ✅ 盘点模式：触发分析
                                 g_inventory_state = INVENTORY_ANALYZING;
                                 system_msg_t analyze_msg = {0};
                                 analyze_msg.cmd = CMD_START_INVENTORY;
-                                strncpy(analyze_msg.mac, g_current_mac, MAC_ADDR_LEN);
+                                snprintf(analyze_msg.mac, sizeof(analyze_msg.mac), "%s", g_current_mac);
+                                
+                                // ✅ 关键修复：发送分析消息到队列
+                                ESP_LOGI(TAG, "Sending CMD_START_INVENTORY to queue...");
                                 xQueueSend(xSystemQueue, &analyze_msg, portMAX_DELAY);
+                                ESP_LOGI(TAG, "CMD_START_INVENTORY sent successfully");
                             } else {
                                 // ✅ 注册模式：触发保存操作
                                 g_inventory_state = INVENTORY_COMPLETE;
                                 
                                 system_msg_t save_msg = {0};
                                 save_msg.cmd = CMD_SAVE_ASSET;
-                                strncpy(save_msg.mac, g_current_mac, MAC_ADDR_LEN);
                                 
-                                // ✅ 使用 malloc 动态分配内存
                                 asset_record_t *record = (asset_record_t *)malloc(sizeof(asset_record_t));
-                                if (record == NULL) {
-                                    ESP_LOGE(TAG, "Failed to allocate memory for asset record");
-                                    uart_write_bytes(UART_NUM, (const char *)"Memory allocation failed!\r\n", 28);
-                                    break;
+                                if (record) {
+                                    // ✅ 修复：使用snprintf确保MAC地址字符串正确终止
+                                    snprintf(record->mac_address, sizeof(record->mac_address), "%s", g_current_mac);
+                                    memcpy(record->front_feature, g_front_feature, sizeof(g_front_feature));
+                                    memcpy(record->side_feature, g_side_feature, sizeof(g_side_feature));
+                                    memcpy(record->top_feature, g_top_feature, sizeof(g_top_feature));
+                                    record->is_valid = true;
+                                    save_msg.data = record;
+                                    
+                                    xQueueSend(xSystemQueue, &save_msg, portMAX_DELAY);
                                 }
-                                
-                                strncpy(record->mac_address, g_current_mac, MAC_ADDR_LEN);
-                                memcpy(record->front_feature, g_front_feature, sizeof(g_front_feature));
-                                memcpy(record->side_feature, g_side_feature, sizeof(g_side_feature));
-                                memcpy(record->top_feature, g_top_feature, sizeof(g_top_feature));
-                                record->is_valid = true;
-                                save_msg.data = record;
-                                
-                                xQueueSend(xSystemQueue, &save_msg, portMAX_DELAY);
                             }
                         }
                     } else {
@@ -355,7 +431,6 @@ static void camera_ai_task(void *pvParameters)
                             g_view_state = VIEW_NONE;
                             g_inventory_state = INVENTORY_IDLE;
                             g_is_inventory_mode = false;  // ✅ 重置模式标志
-                            memset(g_inventory_confidence, 0, sizeof(g_inventory_confidence));
                             
                             // 显示主菜单
                             extern void show_main_menu(void);
@@ -398,18 +473,27 @@ static void camera_ai_task(void *pvParameters)
                             free(ref_record);
                             break;
                         }
+
+                        // ✅ 使用新的混合相似度计算方法
+                        similarity_result_t front_result = {0};
+                        similarity_result_t side_result = {0};
+                        similarity_result_t top_result = {0};
                         
-                        // ✅ 计算三个视图的置信度（余弦相似度）
-                        extern float ai_module_calculate_confidence(const float *feat1, const float *feat2, int dim);
+                        // 对每个视图进行特征匹配（使用默认资产类别）
+                        ai_module_match_features(g_front_feature, ref_record->front_feature, FEATURE_VEC_SIZE,
+                                                ASSET_CLASS_UNKNOWN, &front_result);
+                        ai_module_match_features(g_side_feature, ref_record->side_feature, FEATURE_VEC_SIZE,
+                                                ASSET_CLASS_UNKNOWN, &side_result);
+                        ai_module_match_features(g_top_feature, ref_record->top_feature, FEATURE_VEC_SIZE,
+                                                ASSET_CLASS_UNKNOWN, &top_result);
                         
-                        float conf_front = ai_module_calculate_confidence(g_front_feature, ref_record->front_feature, FEATURE_VEC_SIZE);
-                        float conf_side = ai_module_calculate_confidence(g_side_feature, ref_record->side_feature, FEATURE_VEC_SIZE);
-                        float conf_top = ai_module_calculate_confidence(g_top_feature, ref_record->top_feature, FEATURE_VEC_SIZE);
+                        // 计算加权置信度
+                        float weighted_conf = front_result.confidence * 0.5f + 
+                                            side_result.confidence * 0.3f + 
+                                            top_result.confidence * 0.2f;
                         
-                        float weighted_conf = conf_front * 0.5f + conf_side * 0.3f + conf_top * 0.2f;
-                        
-                        // ✅ 判断是否为同一物品（阈值：0.75）
-                        const float MATCH_THRESHOLD = 0.75f;
+                        // 使用前视图的动态阈值作为判断标准
+                        const float MATCH_THRESHOLD = front_result.match_threshold;
                         const char *match_result;
                         const char *match_symbol;
                         
@@ -421,22 +505,39 @@ static void camera_ai_task(void *pvParameters)
                             match_symbol = "❌";
                         }
                         
-                        // ✅ 输出盘点结果
-                        char result_msg[512];
+                        // ✅ 输出详细的盘点结果（包括混合相似度）
+                        char result_msg[768];
                         snprintf(result_msg, sizeof(result_msg),
-                                 "\r\n========== INVENTORY RESULT ==========\r\n"
-                                 "  Front: %.2f (×0.5)\r\n"
-                                 "  Side:  %.2f (×0.3)\r\n"
-                                 "  Top:   %.2f (×0.2)\r\n"
-                                 "  ----------------------------------------\r\n"
+                                 "\r\n========== INVENTORY RESULT (OPTIMIZED) ==========\r\n"
+                                 "  [FRONT VIEW]\r\n"
+                                 "    Cosine:      %.4f\r\n"
+                                 "    Euclidean:   %.4f\r\n"
+                                 "    Mixed:       %.4f\r\n"
+                                 "    Confidence:  %.4f (×0.5)\r\n"
+                                 "  [SIDE VIEW]\r\n"
+                                 "    Cosine:      %.4f\r\n"
+                                 "    Euclidean:   %.4f\r\n"
+                                 "    Mixed:       %.4f\r\n"
+                                 "    Confidence:  %.4f (×0.3)\r\n"
+                                 "  [TOP VIEW]\r\n"
+                                 "    Cosine:      %.4f\r\n"
+                                 "    Euclidean:   %.4f\r\n"
+                                 "    Mixed:       %.4f\r\n"
+                                 "    Confidence:  %.4f (×0.2)\r\n"
+                                 "  ------------------------------------------------\r\n"
                                  "  Weighted Confidence: %.4f\r\n"
-                                 "  Threshold: %.2f\r\n"
+                                 "  Dynamic Threshold:   %.2f\r\n"
                                  "  %s %s\r\n"
                                  "  MAC: %s\r\n"
                                  "  Camera: POWER OFF\r\n"
-                                 "========================================\r\n",
-                                 conf_front, conf_side, conf_top, weighted_conf, 
-                                 MATCH_THRESHOLD, match_symbol, match_result, msg.mac);
+                                 "===================================================\r\n",
+                                 front_result.cosine_similarity, front_result.euclidean_similarity, 
+                                 front_result.mixed_similarity, front_result.confidence,
+                                 side_result.cosine_similarity, side_result.euclidean_similarity,
+                                 side_result.mixed_similarity, side_result.confidence,
+                                 top_result.cosine_similarity, top_result.euclidean_similarity,
+                                 top_result.mixed_similarity, top_result.confidence,
+                                 weighted_conf, MATCH_THRESHOLD, match_symbol, match_result, msg.mac);
                         uart_write_bytes(UART_NUM, (const char *)result_msg, strlen(result_msg));
                         
                         // LED指示：摄像头关闭 - 红色常亮
@@ -452,7 +553,6 @@ static void camera_ai_task(void *pvParameters)
                         g_view_state = VIEW_NONE;
                         g_inventory_state = INVENTORY_IDLE;
                         g_is_inventory_mode = false;  // ✅ 重置模式标志
-                        memset(g_inventory_confidence, 0, sizeof(g_inventory_confidence));
                         
                         // 显示主菜单
                         extern void show_main_menu(void);
@@ -480,7 +580,7 @@ static void storage_task(void *pvParameters)
     esp_task_wdt_add(NULL);
     
     system_msg_t msg;
-    
+
     while (1) {
         if (xQueueReceive(xStorageQueue, &msg, pdMS_TO_TICKS(2000))) {
             SAFE_WDT_RESET();
@@ -500,11 +600,13 @@ static void storage_task(void *pvParameters)
                     break;
             }
         } else {
+            // 超时，复位看门狗
             SAFE_WDT_RESET();
         }
     }
 }
 
+// ========== 主程序入口 ==========
 void app_main(void)
 {
     // 初始化NVS
@@ -515,42 +617,23 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
     
-    // 注意：ESP-IDF v5.3已自动初始化看门狗，无需再次调用esp_task_wdt_init
-    // 只需将当前任务添加到监控列表
-    SAFE_WDT_ADD();
-    
     // 初始化UART
     init_uart();
     
-    // ✅ 开机时初始化存储（SD卡），增加看门狗复位和延迟避免冲突
-    ESP_LOGI(TAG, "Initializing storage at boot...");
-    esp_task_wdt_reset();
-    vTaskDelay(pdMS_TO_TICKS(100));  // 短暂延迟，让系统稳定
-    
-    if (storage_module_init()) {
-        g_storage_ready = true;
-        ESP_LOGI(TAG, "Storage initialized successfully at boot");
-    } else {
-        ESP_LOGW(TAG, "Storage initialization failed at boot, will retry on first use");
-        g_storage_ready = false;
-    }
-    
-    // 初始化LED指示器
+    // 初始化LED指示灯
     led_indicator_init();
     led_set_color(255, 0, 0);  // 开机红色指示灯 (R=255, G=0, B=0)
     
-    // 创建系统队列
+    // 创建队列
     xSystemQueue = xQueueCreate(10, sizeof(system_msg_t));
     xStorageQueue = xQueueCreate(5, sizeof(system_msg_t));
-    
-    // 初始化命令处理器
-    cmd_handler_init();
     
     // 显示主菜单
     printf("\n");
     printf("========== MAIN MENU ==========\r\n");
     printf("  r - Register new asset\r\n");
     printf("  c - Inventory existing asset\r\n");
+    printf("  d - Delete asset\r\n");
     printf("  l - List all assets\r\n");
     printf("  i - System information\r\n");
     printf("  help/? - Show this menu\r\n");
@@ -560,34 +643,12 @@ void app_main(void)
     
     ESP_LOGI(TAG, "[SYSTEM] ESP32-CAM AI System Ready");
     
-    // 创建FreeRTOS任务
+    // 创建任务
     xTaskCreate(uart_task, "uart_task", 4096, NULL, 5, NULL);
     xTaskCreate(camera_ai_task, "camera_ai_task", 8192, NULL, 5, NULL);
     xTaskCreate(storage_task, "storage_task", 4096, NULL, 4, NULL);
     
-    // app_main 任务进入空闲循环，定期复位看门狗
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(1000));  // 延迟1秒
-        esp_task_wdt_reset();  // 复位看门狗
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
-}
-
-/**
- * @brief 通过UART打印系统信息
- */
-void print_system_info_uart(void)
-{
-    char info_buf[256];
-    
-    // 获取堆内存信息
-    uint32_t free_heap = esp_get_free_heap_size();
-    uint32_t min_free_heap = esp_get_minimum_free_heap_size();
-    
-    snprintf(info_buf, sizeof(info_buf),
-             "\r\nFree heap: %lu bytes\r\n"
-             "Min free heap: %lu bytes\r\n"
-             "SDK version: %s\r\n",
-             free_heap, min_free_heap, esp_get_idf_version());
-    
-    uart_write_bytes(UART_NUM_0, info_buf, strlen(info_buf));
 }

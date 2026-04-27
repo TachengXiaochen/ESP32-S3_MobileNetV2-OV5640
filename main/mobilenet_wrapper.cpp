@@ -1,8 +1,10 @@
 #include "mobilenet_wrapper.h"
 #include "esp_log.h"
 #include "esp_camera.h"
+#include "esp_task_wdt.h"  // 看门狗复位函数
 #include "dl_image.hpp"
 #include "imagenet_cls.hpp"
+#include "feature_processor.h"  // 温度缩放功能
 #include <cstring>
 #include <map>
 
@@ -50,7 +52,15 @@ extern "C" bool mobilenet_extract_features(float *feature_vec, int feature_size)
         return false;
     }
 
-    ESP_LOGI(TAG, "Image captured: %u x %u, format: %d", fb->width, fb->height, fb->format);
+    ESP_LOGI(TAG, "Image captured: %u x %u, format: %d, size: %u bytes", 
+             fb->width, fb->height, fb->format, (unsigned int)fb->len);
+
+    // ✅ 验证格式必须为JPEG
+    if (fb->format != PIXFORMAT_JPEG) {
+        ESP_LOGE(TAG, "Invalid pixel format: %d (expected JPEG)", fb->format);
+        esp_camera_fb_return(fb);
+        return false;
+    }
 
     // 初始化模型（如果尚未初始化）
     if (!g_mobilenet_model) {
@@ -67,36 +77,23 @@ extern "C" bool mobilenet_extract_features(float *feature_vec, int feature_size)
         return false;
     }
 
-    // 准备输入图像 (RGB565 -> RGB888)
-    uint16_t *img_rgb565 = (uint16_t *)fb->buf;
-    size_t num_pixels = fb->len / 2;
-
-    // 分配RGB888缓冲区
-    uint8_t *rgb888 = (uint8_t *)malloc(num_pixels * 3);
-    if (!rgb888) {
-        ESP_LOGE(TAG, "Failed to allocate RGB888 buffer");
+    // ✅ 使用ESP-DL的JPEG解码功能，直接将JPEG解码为RGB888
+    dl::image::jpeg_img_t jpeg_img;
+    jpeg_img.data = fb->buf;
+    jpeg_img.data_len = fb->len;
+    
+    ESP_LOGI(TAG, "Decoding JPEG to RGB888...");
+    
+    // 软件解码JPEG到RGB888
+    dl::image::img_t input_img = dl::image::sw_decode_jpeg(jpeg_img, dl::image::DL_IMAGE_PIX_TYPE_RGB888);
+    
+    if (!input_img.data) {
+        ESP_LOGE(TAG, "JPEG decoding failed");
         esp_camera_fb_return(fb);
         return false;
     }
-
-    // 转换RGB565到RGB888
-    for (size_t i = 0; i < num_pixels; i++) {
-        uint16_t rgb565 = img_rgb565[i];
-        uint8_t r = (rgb565 >> 11) & 0x1F;
-        uint8_t g = (rgb565 >> 5) & 0x3F;
-        uint8_t b = rgb565 & 0x1F;
-
-        rgb888[i * 3 + 0] = (r << 3) | (r >> 2);
-        rgb888[i * 3 + 1] = (g << 2) | (g >> 4);
-        rgb888[i * 3 + 2] = (b << 3) | (b >> 2);
-    }
-
-    // 创建dl::image::img_t结构
-    dl::image::img_t input_img;
-    input_img.data = rgb888;
-    input_img.width = fb->width;
-    input_img.height = fb->height;
-    input_img.pix_type = dl::image::DL_IMAGE_PIX_TYPE_RGB888;  // 使用正确的枚举值
+    
+    ESP_LOGI(TAG, "JPEG decoded successfully: %dx%d", input_img.width, input_img.height);
 
     ESP_LOGI(TAG, "Running MobileNetV2 inference...");
 
@@ -105,7 +102,8 @@ extern "C" bool mobilenet_extract_features(float *feature_vec, int feature_size)
 
     if (results.empty()) {
         ESP_LOGE(TAG, "Model inference failed");
-        free(rgb888);
+        // ✅ 释放JPEG解码内存
+        free(input_img.data);
         esp_camera_fb_return(fb);
         return false;
     }
@@ -115,7 +113,8 @@ extern "C" bool mobilenet_extract_features(float *feature_vec, int feature_size)
 
     if (outputs.empty()) {
         ESP_LOGE(TAG, "No model outputs available");
-        free(rgb888);
+        // ✅ 释放JPEG解码内存
+        free(input_img.data);
         esp_camera_fb_return(fb);
         return false;
     }
@@ -126,7 +125,8 @@ extern "C" bool mobilenet_extract_features(float *feature_vec, int feature_size)
 
     if (!output_tensor) {
         ESP_LOGE(TAG, "Output tensor is null");
-        free(rgb888);
+        // ✅ 释放JPEG解码内存
+        free(input_img.data);
         esp_camera_fb_return(fb);
         return false;
     }
@@ -160,6 +160,9 @@ extern "C" bool mobilenet_extract_features(float *feature_vec, int feature_size)
         memcpy(feature_vec, float_data, feat_len * sizeof(float));
     }
 
+    // ✅ 反量化完成后复位看门狗
+    esp_task_wdt_reset();
+
     // L2归一化特征向量（用于余弦相似度计算）
     float norm = 0.0f;
     for (int i = 0; i < feat_len; i++) {
@@ -173,6 +176,23 @@ extern "C" bool mobilenet_extract_features(float *feature_vec, int feature_size)
         }
     }
 
+    // ✅ 新增：应用温度缩放增强区分度 (T=0.8)
+    extern bool feature_processor_temperature_scaling(const float *feature, int feature_size,
+                                                       float temperature, float *output);
+    float *scaled_features = (float *)malloc(feat_len * sizeof(float));
+    if (scaled_features && feature_processor_temperature_scaling(feature_vec, feat_len, 0.8f, scaled_features)) {
+        memcpy(feature_vec, scaled_features, sizeof(float) * feat_len);
+        ESP_LOGI(TAG, "Temperature scaling applied (T=0.8)");
+    } else {
+        ESP_LOGW(TAG, "Temperature scaling failed, using original features");
+    }
+    if (scaled_features) {
+        free(scaled_features);
+    }
+
+    // ✅ 归一化完成后复位看门狗
+    esp_task_wdt_reset();
+
     // 填充剩余部分为0
     for (int i = feat_len; i < feature_size; i++) {
         feature_vec[i] = 0.0f;
@@ -180,11 +200,15 @@ extern "C" bool mobilenet_extract_features(float *feature_vec, int feature_size)
 
     ESP_LOGI(TAG, "Feature extraction completed: %d features, norm=%.4f", feat_len, norm);
 
-    // 【关键修复】在释放rgb888前，先确保模型输出不再被引用
+    // ✅ 关键修复：释放JPEG解码分配的内存
+    if (input_img.data) {
+        free(input_img.data);
+        input_img.data = nullptr;
+    }
+
     // 清除模型输出引用，防止悬空指针
     outputs.clear();
     
-    free(rgb888);
     esp_camera_fb_return(fb);
     
     // 【关键修复】强制触发一次堆管理器整理
@@ -197,8 +221,13 @@ extern "C" bool mobilenet_extract_features(float *feature_vec, int feature_size)
     
     // 【关键修复】增加延迟时间,确保堆管理器完全稳定
     // MobileNetV2推理后需要更长时间让TLSF堆元数据恢复
-    // 300ms不足以防止fopen时的崩溃,增加到800ms
-    vTaskDelay(pdMS_TO_TICKS(800));
+    // 但在延迟期间必须定期复位看门狗,防止系统重启
+    
+    // 分段延迟,每200ms复位一次看门狗
+    for (int i = 0; i < 4; i++) {
+        vTaskDelay(pdMS_TO_TICKS(200));
+        esp_task_wdt_reset();  // 每200ms复位看门狗
+    }
 
     return true;
 }

@@ -36,3 +36,16 @@ save_result_t storage_module_save_asset(const asset_record_t *record) {
     
     return is_overwrite ? SAVE_RESULT_SUCCESS_OVERWRITE : SAVE_RESULT_SUCCESS_NEW;
 }
+
+esp_err_t storage_module_save_image(const char *mac_address, const char *view_name, 
+                                    const uint8_t *jpeg_data, size_t jpeg_len) {
+    if (!g_is_initialized) {
+        ESP_LOGE(TAG, "Storage not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    // 复位看门狗，确保稳定性
+    esp_task_wdt_reset();
+    
+    return asset_save_image(mac_address, view_name, jpeg_data, jpeg_len);
+}

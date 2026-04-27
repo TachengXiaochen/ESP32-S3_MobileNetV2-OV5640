@@ -42,6 +42,17 @@ esp_err_t asset_manager_init(void);
 esp_err_t asset_save(const asset_record_t *record, bool *is_overwrite);
 
 /**
+ * @brief 保存资产图片到当前存储介质
+ * @param mac_address MAC地址
+ * @param view_name 视图名称（"front", "side", "top"）
+ * @param jpeg_data JPEG图像数据指针
+ * @param jpeg_len JPEG数据长度
+ * @return ESP_OK表示成功
+ */
+esp_err_t asset_save_image(const char *mac_address, const char *view_name, 
+                           const uint8_t *jpeg_data, size_t jpeg_len);
+
+/**
  * @brief 从当前存储介质加载资产记录
  * @param mac_address MAC地址
  * @param record 输出参数，资产记录

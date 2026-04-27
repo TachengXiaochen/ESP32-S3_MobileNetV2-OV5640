@@ -2,6 +2,7 @@
 #include "mobilenet_wrapper.h"
 #include "esp_log.h"
 #include "esp_camera.h"
+#include <string.h>  // ✅ 添加string.h以支持memcpy
 #include "sdkconfig.h"
 
 static const char *TAG = "camera_mod";
@@ -48,7 +49,7 @@ bool camera_module_init(void) {
     config.pin_pwdn = CAMERA_PIN_PWDN;
     config.pin_reset = CAMERA_PIN_RESET;
     config.xclk_freq_hz = 20000000;
-    config.pixel_format = PIXFORMAT_RGB565;
+    config.pixel_format = PIXFORMAT_JPEG;  // ✅ 固定使用JPEG格式，避免动态切换的不稳定性
     config.frame_size = FRAMESIZE_QVGA; // 320x240
     config.jpeg_quality = 12;
     config.fb_count = 2;
@@ -68,7 +69,7 @@ bool camera_module_init(void) {
     }
 
     g_is_initialized = true;
-    ESP_LOGI(TAG, "Camera initialized successfully");
+    ESP_LOGI(TAG, "Camera initialized successfully (JPEG format - stable mode)");
     return true;
 }
 
@@ -80,6 +81,53 @@ bool camera_module_capture_and_process(float *feature_out, int feature_size) {
     
     // 直接调用 mobilenet_wrapper 提供的接口
     return mobilenet_extract_features(feature_out, feature_size);
+}
+
+bool camera_module_capture_jpeg(uint8_t **jpeg_buf, size_t *jpeg_len) {
+    if (!g_is_initialized) {
+        ESP_LOGE(TAG, "Camera not initialized!");
+        return false;
+    }
+    
+    if (!jpeg_buf || !jpeg_len) {
+        ESP_LOGE(TAG, "Invalid output parameters");
+        return false;
+    }
+    
+    // ✅ 直接捕获JPEG帧（摄像头已固定为JPEG格式）
+    camera_fb_t *fb = esp_camera_fb_get();
+    if (!fb) {
+        ESP_LOGE(TAG, "Camera capture failed");
+        return false;
+    }
+    
+    // 验证格式
+    if (fb->format != PIXFORMAT_JPEG) {
+        ESP_LOGE(TAG, "Unexpected frame format: %d (expected JPEG)", fb->format);
+        esp_camera_fb_return(fb);
+        *jpeg_buf = NULL;
+        *jpeg_len = 0;
+        return false;
+    }
+    
+    // ✅ 复制JPEG数据到独立缓冲区
+    *jpeg_len = fb->len;
+    *jpeg_buf = (uint8_t *)malloc(fb->len);
+    
+    if (*jpeg_buf == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate memory for JPEG buffer (%u bytes)", (unsigned int)fb->len);
+        esp_camera_fb_return(fb);
+        *jpeg_len = 0;
+        return false;
+    }
+    
+    memcpy(*jpeg_buf, fb->buf, fb->len);
+    
+    // 释放摄像头帧缓冲区
+    esp_camera_fb_return(fb);
+    
+    ESP_LOGI(TAG, "JPEG captured successfully: %u bytes", (unsigned int)*jpeg_len);
+    return true;
 }
 
 void camera_module_deinit(void) {
