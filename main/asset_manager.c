@@ -339,22 +339,56 @@ esp_err_t asset_load(const char *mac_address, asset_record_t *record)
         return ESP_FAIL;
     }
 
-    // 读取资产记录
+    // 获取文件大小用于向后兼容检测
+    fseek(f, 0, SEEK_END);
+    long file_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    
+    // 先尝试新格式读取
     size_t read_count = fread(record, sizeof(asset_record_t), 1, f);
     fclose(f);
 
-    if (read_count != 1) {
-        ESP_LOGE(TAG, "Failed to read asset record");
-        return ESP_FAIL;
+    if (read_count == 1 && record->is_valid) {
+        ESP_LOGI(TAG, "Asset loaded successfully (new format) for MAC: %s", record->mac_address);
+        return ESP_OK;
     }
 
-    if (!record->is_valid) {
-        ESP_LOGW(TAG, "Asset record is invalid");
-        return ESP_ERR_INVALID_STATE;
+    // 向后兼容：检测旧格式并逐字段读取
+    #define OLD_RECORD_SIZE (MAC_ADDR_LEN + 1 + 3 * FEATURE_VEC_SIZE * sizeof(float) + sizeof(bool))
+    
+    if (file_size == OLD_RECORD_SIZE && read_count != 1) {
+        ESP_LOGI(TAG, "Detected old format asset (%ld bytes), migrating...", file_size);
+        
+        // 重新打开文件
+        f = fopen(file_path, "rb");
+        if (!f) {
+            ESP_LOGE(TAG, "Failed to reopen file for old format read");
+            return ESP_FAIL;
+        }
+        
+        // 按旧格式逐字段读取
+        memset(record, 0, sizeof(asset_record_t));
+        fread(record->mac_address, MAC_ADDR_LEN + 1, 1, f);
+        fread(record->front_feature, sizeof(float), FEATURE_VEC_SIZE, f);
+        fread(record->side_feature, sizeof(float), FEATURE_VEC_SIZE, f);
+        fread(record->top_feature, sizeof(float), FEATURE_VEC_SIZE, f);
+        fread(&record->is_valid, sizeof(bool), 1, f);
+        fclose(f);
+        
+        // 新字段填充默认值
+        memset(record->item_name, 0, sizeof(record->item_name));
+        record->storage_area = '?';
+        record->quantity = 0;
+        
+        if (record->is_valid) {
+            ESP_LOGI(TAG, "Old asset migrated successfully for MAC: %s", record->mac_address);
+            return ESP_OK;
+        }
     }
-
-    ESP_LOGI(TAG, "Asset loaded successfully for MAC: %s", record->mac_address);
-    return ESP_OK;
+    
+    ESP_LOGE(TAG, "Failed to read asset record (file_size=%ld, expected_new=%u, expected_old=%u)",
+             file_size, (unsigned)sizeof(asset_record_t), (unsigned)OLD_RECORD_SIZE);
+    return ESP_FAIL;
 }
 
 /**
@@ -788,9 +822,29 @@ void asset_list_uart(void)
                 }
             }
             
-            char item_buf[64];
-            snprintf(item_buf, sizeof(item_buf), "  [%d] MAC: %s\r\n", index++, mac_display);
-            uart_write_bytes(UART_NUM_0, item_buf, strlen(item_buf));
+            // 加载资产记录获取详细信息（堆分配避免栈溢出）
+            asset_record_t *record = (asset_record_t *)malloc(sizeof(asset_record_t));
+            if (record) {
+                esp_err_t load_ret = asset_load(mac_display, record);
+                
+                if (load_ret == ESP_OK && record->is_valid) {
+                    char item_buf[192];
+                    snprintf(item_buf, sizeof(item_buf), 
+                             "  [%d] MAC: %-17s | %-20s | %c | %lu\r\n",
+                             index++, mac_display, record->item_name, 
+                             record->storage_area, (unsigned long)record->quantity);
+                    uart_write_bytes(UART_NUM_0, item_buf, strlen(item_buf));
+                } else {
+                    char item_buf[64];
+                    snprintf(item_buf, sizeof(item_buf), "  [%d] MAC: %s\r\n", index++, mac_display);
+                    uart_write_bytes(UART_NUM_0, item_buf, strlen(item_buf));
+                }
+                free(record);
+            } else {
+                char item_buf[64];
+                snprintf(item_buf, sizeof(item_buf), "  [%d] MAC: %s\r\n", index++, mac_display);
+                uart_write_bytes(UART_NUM_0, item_buf, strlen(item_buf));
+            }
         }
     }
 

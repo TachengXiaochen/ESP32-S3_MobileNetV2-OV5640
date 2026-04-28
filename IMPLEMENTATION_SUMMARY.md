@@ -14,8 +14,9 @@
 - **硬件抽象层 (HAL)**：摄像头、TF卡、UART独立模块
 - **业务逻辑层**：AI推理、资产管理解耦
 - **任务隔离**：高负载模块独立运行，避免资源竞争
+- **双线程架构**（V2.5）：拍摄与推理分离，提升响应速度
 
-#### 模块清单（V2.4完整版）
+#### 模块清单（V2.5完整版）
 
 | 模块 | 文件 | 职责 | 运行核心 |
 |------|------|------|----------|
@@ -25,24 +26,36 @@
 | **相似度匹配器** | [similarity_matcher.c/h](main/similarity_matcher.c) ⭐NEW | 混合相似度、置信度校准、动态阈值 | Core 1 |
 | **存储模块** | [storage_module.c/h](main/storage_module.c) | TF卡挂载、文件系统管理 | Core 0 |
 | **资产管理** | [asset_manager.c/h](main/asset_manager.c) | 资产记录、文件IO、空间监控、**删除功能** ⭐ | Core 0 |
-| **命令处理器** | [cmd_handler.c/h](main/cmd_handler.c) | 命令解析、状态机管理、**删除流程** ⭐ | Core 1 |
+| **命令处理器** | [cmd_handler.c/h](main/cmd_handler.c) | 命令解析、状态机管理、**删除/出库流程** ⭐ | Core 1 |
 | **LED指示器** | [led_indicator.c/h](main/led_indicator.c) ⭐NEW | WS2812控制、状态指示、闪烁反馈 | Core 1 |
-| **主控制器** | [main.c](main/main.c) | 任务调度、UART交互、状态管理 | - |
+| **主控制器** | [main.c](main/main.c) | 任务调度、UART交互、**双线程协调** | - |
 
 #### 任务间通信
 使用 **FreeRTOS Queue** 实现异步解耦：
 ```
+// 系统消息队列（拍摄任务 → 主控制器）
 typedef struct {
     system_cmd_t cmd;      // 命令类型
     void *data;            // 数据指针（如特征向量）
     char mac[MAC_ADDR_LEN + 1];  // MAC地址标识
 } system_msg_t;
 
+// 推理任务队列（拍摄任务 → 推理任务）⭐NEW V2.5
+typedef struct {
+    system_cmd_t view_cmd;          // CMD_CAPTURE_FRONT / SIDE / TOP
+    char mac[MAC_ADDR_LEN + 1];     // MAC地址
+    int expected_views;             // 期望的总视图数 (注册/盘点=3, 出库=1)
+    bool is_registration;           // 注册模式(true: 需保存JPEG, false: 盘点/出库)
+    bool must_save_jpeg;            // 是否必须保存JPEG(注册模式)
+} inference_job_t;
+
 // 发送消息
 xQueueSend(xSystemQueue, &msg, portMAX_DELAY);
+xQueueSend(xInferenceQueue, &job, portMAX_DELAY);
 
 // 接收消息
 xQueueReceive(xSystemQueue, &msg, portMAX_DELAY);
+xQueueReceive(xInferenceQueue, &job, portMAX_DELAY);
 ```
 
 ---
@@ -59,7 +72,7 @@ xQueueReceive(xSystemQueue, &msg, portMAX_DELAY);
 #### 算法实现
 
 **多帧融合流程**（⭐NEW）：
-```c
+```
 // 1. 清空融合缓冲区
 feature_processor_clear_buffer();
 
@@ -261,7 +274,7 @@ static void ws2812_send_color(uint8_t r, uint8_t g, uint8_t b)
 | 拍摄顶部 | 模式色闪烁3次 | 200ms亮 + 100ms灭 × 3 | `led_capture_top(is_inventory)` |
 
 **闪烁实现**：
-```c
+```
 void led_blink(uint8_t r, uint8_t g, uint8_t b, uint8_t count)
 {
     // 闪烁前先熄灭当前LED，避免视觉冲突
@@ -290,7 +303,7 @@ void led_blink(uint8_t r, uint8_t g, uint8_t b, uint8_t count)
 **三种相似度计算方法**：
 
 1. **余弦相似度**（Cosine Similarity）：
-```c
+``c
 float similarity_matcher_cosine(const float *feat1, const float *feat2, int size)
 {
     float dot_product = 0.0f, norm1 = 0.0f, norm2 = 0.0f;
@@ -307,7 +320,7 @@ float similarity_matcher_cosine(const float *feat1, const float *feat2, int size
 ```
 
 2. **欧氏距离相似度**（Euclidean Distance Similarity）：
-```c
+``c
 float similarity_matcher_euclidean(const float *feat1, const float *feat2, int size)
 {
     float sum_squared_diff = 0.0f;
@@ -322,7 +335,7 @@ float similarity_matcher_euclidean(const float *feat1, const float *feat2, int s
 ```
 
 3. **混合相似度**（Mixed Similarity）：
-```c
+``c
 float similarity_matcher_mixed(const float *feat1, const float *feat2, int size)
 {
     float cosine_sim = similarity_matcher_cosine(feat1, feat2, size);
@@ -336,7 +349,7 @@ float similarity_matcher_mixed(const float *feat1, const float *feat2, int size)
 #### 置信度校准
 
 **查找表插值**：
-```c
+```
 static const calibration_point_t g_calibration_table[] = {
     {0.50f, 0.01f},  // 相似度0.5 -> 置信度1%
     {0.60f, 0.10f},
@@ -371,7 +384,7 @@ float similarity_matcher_calibrate_confidence(float similarity)
 #### 动态阈值
 
 **资产类别阈值表**：
-```c
+```
 #define THRESHOLD_ELECTRONIC  0.85f  // 电子产品（高精度要求）
 #define THRESHOLD_FURNITURE   0.70f  // 家具（允许一定差异）
 #define THRESHOLD_TOOL        0.78f  // 工具
@@ -392,7 +405,7 @@ float similarity_matcher_get_threshold(asset_class_t asset_class)
 
 #### 完整匹配流程
 
-```c
+```
 bool similarity_matcher_match(const float *feat1, const float *feat2, int size,
                               asset_class_t asset_class, similarity_result_t *result)
 {
@@ -652,120 +665,141 @@ idf_component_register(
 
 ---
 
-## 🔄 v2.4 更新详情（2026-04-27）⭐NEW
+## 🔄 V2.5 重大升级（2026-04-28）⭐NEW
 
-### ✨ 新增功能
+### ✨ V2.5 重大升级
 
-#### 1. 资产删除功能
-- **功能描述**：一键删除资产及其关联的三张图片，支持二次确认和实时列表刷新
+**出库模式 + 资产详细信息 + 双线程架构** ⭐NEW
+
+#### 🚪 1. 出库模式（Outbound Mode）
+- **功能描述**：专门用于资产出库管理的独立模式，仅需拍摄正视图进行快速比对，自动更新库存数量
 - **实现位置**：
-  - [asset_manager.c](main/asset_manager.c) `asset_delete()` 函数
-  - [cmd_handler.c](main/cmd_handler.c) 删除状态机（`CAM_STATE_WAITING_DEL_MAC` 和 `CAM_STATE_WAITING_DEL_CONFIRM`）
+  - [main.c](main/main.c) `camera_ai_task()` 中新增 `CMD_OUTBOUND_ANALYZE` 和 `CMD_OUTBOUND_UPDATE_QTY` 处理
+  - [cmd_handler.c](main/cmd_handler.c) 新增出库模式状态机（`CAM_STATE_WAITING_OUT_MAC`、`CAM_STATE_WAITING_OUT_QTY`）
+  - [main.h](main/main.h) 新增全局变量 `g_is_outbound_mode`、`g_outbound_quantity`
 - **技术要点**：
-  - 删除顺序：特征文件(.dat) → front.jpg → side.jpg → top.jpg
-  - 文件名转换：MAC地址中的':'替换为'_'（如 `AA_BB_CC_DD_EE_FF.dat`）
-  - 错误处理：文件不存在不算失败，继续删除其他文件
-  - 用户体验：删除成功后自动刷新资产列表
-- **状态机设计**：
+  - 仅拍摄1个视图（front），通过 `g_total_views = 1` 控制
+  - 双重验证：先比对再更新，防止错误出库
+  - 零库存自动删除：数量归零时调用 `asset_delete()`
+  - 出库记录保存：保留原始图片作为凭证
+- **工作流程**：
   ```
-  主菜单 → 输入'd' → 等待MAC → 验证存在 → 确认提示 → 执行删除 → 返回列表
+  输入 'o' → 输入MAC → 显示资产信息 → 输入数量 → 拍摄正面 → 比对分析 → 更新库存
   ```
+- **边界处理**：
+  - 出库数量 ≥ 当前库存：数量归零，自动删除资产
+  - 比对失败：不更新数量，返回主菜单
+  - 资产不存在：提示用户先注册
 
-#### 2. 多帧融合特征提取
-- **功能描述**：每次拍摄采集3帧图像，计算特征向量平均值，降低噪声影响
+#### 📝 2. 资产详细信息管理
+- **功能描述**：入库注册时收集物品名称、存放区域和数量信息，列表展示时完整显示这些详细信息
 - **实现位置**：
-  - [feature_processor.c/h](main/feature_processor.c) 新增模块
-  - [main.c](main/main.c) `camera_ai_task` 中集成调用
-- **技术要点**：
-  - 缓冲区管理：动态分配3×1280×4字节的特征缓冲区
-  - 滑动窗口：缓冲区满时向前移动，丢弃最旧帧
-  - 批归一化：可选的通道维度标准化（均值0，方差1）
-  - L2归一化：确保输出特征向量单位长度
-- **性能影响**：
-  - 耗时增加：从2.5秒增加到7.5秒（+5秒）
-  - 准确率提升：实测+5-8%
-  - 内存占用：额外约15KB
-- **配置参数**：
+  - [asset_manager.h](main/asset_manager.h) `asset_record_t` 结构体新增字段
+  - [cmd_handler.c](main/cmd_handler.c) 注册流程增加三步输入（名称、区域、数量）
+  - [asset_manager.c](main/asset_manager.c) `asset_list_uart()` 修改为表格显示
+- **数据结构变更**：
   ```c
-  #define DEFAULT_NUM_FRAMES 3  // 可调整为2-5
-  #define DEFAULT_TEMPERATURE_SCALE 0.8f
-  #define DEFAULT_BATCH_NORM_MOMENTUM 0.1f
+  typedef struct {
+      char mac_address[MAC_ADDR_LEN + 1];  // MAC地址字符串
+      char item_name[128];                 // ⭐ 新增：物品名称
+      char storage_area;                   // ⭐ 新增：存放区域（A-Z）
+      uint32_t quantity;                   // ⭐ 新增：物品数量
+      float front_feature[FEATURE_VEC_SIZE];
+      float side_feature[FEATURE_VEC_SIZE];
+      float top_feature[FEATURE_VEC_SIZE];
+      bool is_valid;
+  } asset_record_t;
+  ```
+- **向后兼容**：
+  - 旧格式检测：文件大小 = `OLD_RECORD_SIZE`
+  - 自动迁移：旧数据加载时填充默认值（item_name=""，storage_area='?'，quantity=0）
+  - 新格式保存：完整保存所有字段
+- **注册流程升级**：
+  ```
+  输入 'r' → 输入MAC → 输入名称 → 输入区域 → 输入数量 → 初始化硬件 → 开始拍摄
   ```
 
-#### 3. LED状态指示器
-- **功能描述**：WS2812 RGB LED控制，提供直观的状态反馈
+#### ⚡ 3. 拍摄与推理线程分离
+- **功能描述**：将JPEG捕获（拍摄线程）和MobileNet推理（推理线程）分离到两个独立的FreeRTOS任务中，通过队列异步通信
 - **实现位置**：
-  - [led_indicator.c/h](main/led_indicator.c) 新增模块
-  - [main.c](main/main.c) 各状态切换时调用LED函数
-- **技术要点**：
-  - RMT驱动：10MHz分辨率，精确控制WS2812时序
-  - GRB顺序：WS2812使用绿-红-蓝字节序
-  - 亮度控制：默认50%亮度（128/255），避免过亮刺眼
-  - 闪烁逻辑：先熄灭再闪烁，避免视觉冲突
-- **状态映射**：
-  - 红色常亮：待机/摄像头关闭
-  - 绿色常亮：注册模式
-  - 蓝色常亮：盘点模式
-  - 闪烁次数：正面1次、侧面2次、顶部3次
-- **硬件要求**：
-  - WS2812B LED连接到GPIO48
-  - 需要5V外部供电（3.3V驱动能力不足）
-
-#### 4. 混合相似度算法
-- **功能描述**：结合余弦相似度和欧氏距离，提供更鲁棒的匹配评估
-- **实现位置**：
-  - [similarity_matcher.c/h](main/similarity_matcher.c) 新增模块
-  - [main.c](main/main.c) `CMD_START_INVENTORY` 中调用
-- **技术要点**：
-  - 三种相似度：余弦、欧氏、混合（70%/30%）
-  - 置信度校准：基于查找表的线性插值
-  - 动态阈值：根据资产类别自动调整（0.70-0.85）
-  - 详细输出：盘点结果展示所有相似度指标
-- **校准表设计**：
+  - [main.c](main/main.c) 新增 `inference_task()` 函数
+  - [main.c](main/main.c) 新增 `xInferenceQueue` 推理任务队列
+  - [main.c](main/main.c) 修改 `camera_ai_task()` 仅负责JPEG捕获和入队
+  - [main.h](main/main.h) 新增 `inference_job_t` 结构体和进度计数器
+- **架构设计**：
+  ```
+  camera_ai_task (拍摄线程):
+    - JPEG捕获 (~200ms)
+    - 保存图片到TF卡
+    - 创建inference_job_t并入队
+    - 立即反馈用户
+  
+  xInferenceQueue (推理任务队列):
+    - view_cmd: CMD_CAPTURE_FRONT/SIDE/TOP
+    - mac: MAC地址
+    - expected_views: 期望视图数
+    - is_registration: 是否注册模式
+  
+  inference_task (推理线程):
+    - 从队列接收任务
+    - 循环3次采集帧并推理
+    - 特征融合（平均值）
+    - L2归一化
+    - 存入全局特征缓冲区
+    - 检查是否全部完成，触发最终操作
+  ```
+- **性能提升**：
+  - 拍摄反馈延迟：~7.5秒 → ~200ms（**37倍提升**）
+  - 用户体验：拍摄后可立即进行下一步操作
+  - 系统稳定性：避免长时间阻塞导致看门狗超时
+  - CPU利用率：拍摄和推理可并行执行
+- **关键代码**：
   ```c
-  {0.50f, 0.01f}, {0.60f, 0.10f}, {0.70f, 0.50f},
-  {0.75f, 0.70f}, {0.80f, 0.85f}, {0.85f, 0.92f},
-  {0.90f, 0.97f}, {0.95f, 0.99f}, {1.00f, 1.00f}
+  // 进度计数器
+  int g_views_enqueued = 0;   // 已入队推理任务数
+  int g_views_processed = 0;  // 已完成推理数
+  int g_total_views = 0;      // 期望总视图数
+  
+  // 推理任务完成后触发
+  if (g_views_processed == g_total_views) {
+      system_msg_t trigger_msg = {0};
+      trigger_msg.cmd = CMD_INFERENCE_TRIGGER;
+      xQueueSend(xSystemQueue, &trigger_msg, portMAX_DELAY);
+  }
   ```
-- **输出示例**：
-  ```
-  [FRONT VIEW]
-    Cosine:      0.9234
-    Euclidean:   0.8876
-    Mixed:       0.9127
-    Confidence:  0.9500 (×0.5)
-  ```
-
-#### 5. 强制退出命令
-- **功能描述**：在任何状态下输入 `exit` 或 `quit` 立即返回主菜单
-- **实现位置**：[cmd_handler.c](main/cmd_handler.c) `cmd_handler_process()` 函数开头
-- **技术要点**：
-  - 全局可用：优先于其他命令检查
-  - 安全清理：关闭摄像头、重置状态机、释放资源
-  - 状态重置：`g_camera_state`、`g_view_state`、`g_inventory_state`、`g_is_inventory_mode`
-- **使用场景**：
-  - 拍摄过程中想取消操作
-  - MAC地址输入错误需要重新选择模式
-  - 系统异常时强制复位
 
 ### 📊 技术架构变更
 
 | 模块 | 变更内容 | 影响范围 |
 |------|---------|---------|
-| **feature_processor** | 新增模块，管理多帧缓冲区 | 特征提取流程重构 |
-| **similarity_matcher** | 新增模块，提供多种相似度计算 | 盘点算法升级 |
-| **led_indicator** | 新增模块，WS2812驱动 | 状态反馈增强 |
-| **asset_manager** | 添加 `asset_delete()` 函数 | 存储管理扩展 |
-| **cmd_handler** | 添加删除流程和强制退出 | 命令解析完善 |
-| **main** | 集成多帧融合、LED控制、混合相似度 | 任务逻辑增强 |
+| **main** | 新增推理线程、推理队列、出库命令处理 | 核心架构重构 |
+| **cmd_handler** | 新增出库状态机、注册四步流程、详细列表显示 | 命令解析扩展 |
+| **asset_manager** | 结构体新增字段、旧格式迁移、表格显示 | 数据管理增强 |
+| **main.h** | 新增命令、状态、结构体、全局变量声明 | 接口定义更新 |
 
 ### ⚠️ 注意事项
 
-1. **删除不可恢复**：资产删除后无法恢复，务必谨慎操作
-2. **多帧耗时增加**：3帧融合使单次拍摄耗时从2.5秒增加到7.5秒
-3. **LED供电要求**：WS2812需要5V供电，3.3V可能无法正常工作
-4. **混合相似度权重**：70%/30%是经验值，可根据实际场景调整
-5. **置信度校准表**：基于特定数据集拟合，可能需要针对实际应用重新校准
+1. **出库模式规范**：
+   - 仅适用于已注册的资产
+   - 出库前务必核对MAC地址和物品信息
+   - 数量归零后资产将被自动删除（不可恢复）
+
+2. **资产信息完整性**：
+   - 物品名称建议简洁明了（1-127字符）
+   - 存放区域必须是单个字母（A-Z）
+   - 数量必须大于0
+   - 旧版本注册的资产可能缺少这些信息
+
+3. **双线程架构特性**：
+   - 拍摄后立即反馈，无需等待推理
+   - 推理在后台异步进行
+   - 全部视图推理完成后才触发最终操作
+   - 使用`exit`命令会清空推理队列并重置计数器
+
+4. **向后兼容性**：
+   - 新版本可以读取旧版本的资产文件
+   - 旧格式会自动迁移到新格式（填充默认值）
+   - 新版本保存的文件无法被旧版本读取
 
 ---
 
@@ -833,6 +867,6 @@ idf_component_register(
 
 ---
 
-**文档版本**: v2.4  
-**最后更新**: 2026-04-27  
+**文档版本**: v2.5  
+**最后更新**: 2026-04-28  
 **作者**: ESP32-S3 CAM AI Team

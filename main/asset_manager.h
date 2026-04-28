@@ -15,6 +15,9 @@ extern "C" {
 
 typedef struct {
     char mac_address[MAC_ADDR_LEN + 1];  // MAC地址字符串
+    char item_name[128];                 // 物品名称
+    char storage_area;                   // 存放区域（A-Z）
+    uint32_t quantity;                   // 物品数量
     float front_feature[FEATURE_VEC_SIZE]; // 正面特征向量
     float side_feature[FEATURE_VEC_SIZE];  // 侧面特征向量
     float top_feature[FEATURE_VEC_SIZE];   // 顶部特征向量

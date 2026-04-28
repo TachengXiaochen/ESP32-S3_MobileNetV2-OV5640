@@ -77,9 +77,10 @@ void cmd_handler_show_help(void)
         "\r\n[HELP] Command List:\r\n"
         "  MAC地址: AA:BB:CC:DD:EE:FF\r\n"
         "  f/s/t: 拍摄正/侧/顶视图\r\n"
+        "  r: 注册（入库）新资产\r\n"
         "  c: 进入盘点引导模式\r\n"
+        "  o: 出库资产\r\n"
         "  d: 进入删除资产模式\r\n"
-        "  p XX:XX:XX:XX:XX:XX: 指定MAC盘点\r\n"
         "  l: 列出所有资产\r\n"
         "  i: 显示系统信息\r\n"
         "  exit/quit: 强制退出到主菜单（任何阶段）\r\n"
@@ -95,7 +96,8 @@ void show_main_menu(void)
 {
     const char *menu = 
         "\r\n========== MAIN MENU ==========\r\n"
-        "  r - Register new asset\r\n"
+        "  r - Register new asset (入库)\r\n"
+        "  o - Outbound asset (出库)\r\n"
         "  c - Inventory existing asset\r\n"
         "  d - Delete asset\r\n"
         "  l - List all assets\r\n"
@@ -113,11 +115,56 @@ static void show_registration_mode_guide(void)
 {
     const char *guide = 
         "\r\n========== REGISTRATION MODE ==========\r\n"
-        "  Please input MAC address to register:\r\n"
+        "  Step 1: Input MAC address to register:\r\n"
         "  Format: XX:XX:XX:XX:XX:XX\r\n"
         "  Example: AA:BB:CC:DD:EE:FF\r\n"
         "=========================================\r\n"
         "[GUIDE] Input MAC address: ";
+    uart_write_bytes(UART_NUM_0, guide, strlen(guide));
+}
+
+/**
+ * @brief 显示注册模式第二步引导（输入物品名称）
+ */
+static void show_registration_name_guide(const char *mac)
+{
+    char guide[256];
+    snprintf(guide, sizeof(guide),
+             "\r\n========== REGISTRATION MODE ==========\r\n"
+             "  MAC: %s\r\n"
+             "  Step 2: Input item name:\r\n"
+             "  Example: Wooden Chair, Steel Bolt M8\r\n"
+             "=========================================\r\n"
+             "[GUIDE] Input item name: ",
+             mac);
+    uart_write_bytes(UART_NUM_0, guide, strlen(guide));
+}
+
+/**
+ * @brief 显示注册模式第三步引导（输入存放区域）
+ */
+static void show_registration_area_guide(void)
+{
+    const char *guide = 
+        "\r\n========== REGISTRATION MODE ==========\r\n"
+        "  Step 3: Input storage area (A-Z):\r\n"
+        "  Example: A, B, C...\r\n"
+        "=========================================\r\n"
+        "[GUIDE] Input storage area: ";
+    uart_write_bytes(UART_NUM_0, guide, strlen(guide));
+}
+
+/**
+ * @brief 显示注册模式第四步引导（输入数量）
+ */
+static void show_registration_quantity_guide(void)
+{
+    const char *guide = 
+        "\r\n========== REGISTRATION MODE ==========\r\n"
+        "  Step 4: Input quantity (positive integer):\r\n"
+        "  Example: 1, 10, 100...\r\n"
+        "=========================================\r\n"
+        "[GUIDE] Input quantity: ";
     uart_write_bytes(UART_NUM_0, guide, strlen(guide));
 }
 
@@ -413,6 +460,19 @@ void cmd_handler_process(const char *cmd_line)
         g_inventory_state = INVENTORY_IDLE;
         extern bool g_is_inventory_mode;
         g_is_inventory_mode = false;  // ✅ 重置模式标志
+        extern bool g_is_outbound_mode;
+        g_is_outbound_mode = false;
+        
+        // ✅ 清空推理队列并重置计数器
+        extern QueueHandle_t xInferenceQueue;
+        extern int g_views_enqueued;
+        extern int g_views_processed;
+        extern int g_total_views;
+        inference_job_t discard_job;
+        while (xQueueReceive(xInferenceQueue, &discard_job, 0) == pdTRUE) {}
+        g_views_enqueued = 0;
+        g_views_processed = 0;
+        g_total_views = 0;
         
         // 关闭摄像头
         extern bool g_camera_power_on;
@@ -488,7 +548,23 @@ void cmd_handler_process(const char *cmd_line)
             return;
         }
         
-        // 4.3 删除模式选择
+        // 4.3 出库模式选择
+        if (strcasecmp(cmd_buf, "o") == 0) {
+            ESP_LOGI(TAG, "Entering outbound mode");
+            g_camera_state = CAM_STATE_WAITING_OUT_MAC;  // 等待出库MAC
+            g_inventory_state = INVENTORY_IDLE;
+            const char *guide = 
+                "\r\n========== OUTBOUND MODE ==========\r\n"
+                "  Please input MAC address to outbound:\r\n"
+                "  Format: XX:XX:XX:XX:XX:XX\r\n"
+                "  Example: AA:BB:CC:DD:EE:FF\r\n"
+                "======================================\r\n"
+                "[GUIDE] Input MAC address: ";
+            uart_write_bytes(UART_NUM_0, guide, strlen(guide));
+            return;
+        }
+
+        // 4.4 删除模式选择
         if (strcasecmp(cmd_buf, "d") == 0) {
             ESP_LOGI(TAG, "Entering delete mode");
             g_camera_state = CAM_STATE_WAITING_DEL_MAC;  // 等待删除MAC
@@ -496,7 +572,7 @@ void cmd_handler_process(const char *cmd_line)
             return;
         }
         
-        // 4.4 无效命令
+        // 4.5 无效命令
         uart_write_bytes(UART_NUM_0, "[ERROR] Unknown command. Type 'help' for assistance.\r\n", 53);
         return;
     }
@@ -504,21 +580,12 @@ void cmd_handler_process(const char *cmd_line)
     // ========== 5. 等待注册MAC地址状态 ==========
     if (g_camera_state == CAM_STATE_WAITING_REG_MAC) {
         if (cmd_handler_validate_mac(cmd_buf)) {
-            // ✅ 设置模式标志为注册模式
-            extern bool g_is_inventory_mode;
-            g_is_inventory_mode = false;
+            // 保存MAC地址到全局变量
+            snprintf(g_current_mac, MAC_ADDR_LEN + 1, "%s", cmd_buf);
             
-            // LED指示：注册模式 - 绿色常亮
-            extern void led_camera_registration(void);
-            led_camera_registration();
-            
-            handle_mac_initialization(cmd_buf);
-            
-            // 重置盘点状态为空闲，准备开始注册流程
-            g_inventory_state = INVENTORY_IDLE; 
-            
-            // 显示注册第一步引导
-            show_registration_step1(cmd_buf);
+            // 进入物品名称输入阶段
+            g_camera_state = CAM_STATE_WAITING_REG_NAME;
+            show_registration_name_guide(cmd_buf);
             return;
         } else {
             uart_write_bytes(UART_NUM_0, "[ERROR] Invalid MAC address format.\r\n", 37);
@@ -529,12 +596,216 @@ void cmd_handler_process(const char *cmd_line)
         }
     }
     
+    // ========== 5b. 等待注册物品名称状态 ==========
+    if (g_camera_state == CAM_STATE_WAITING_REG_NAME) {
+        if (strlen(cmd_buf) > 0 && strlen(cmd_buf) < 128) {
+            extern char g_reg_item_name[];
+            snprintf(g_reg_item_name, 128, "%s", cmd_buf);
+            g_camera_state = CAM_STATE_WAITING_REG_AREA;
+            show_registration_area_guide();
+            return;
+        } else {
+            uart_write_bytes(UART_NUM_0, "[ERROR] Item name is required (1-127 chars).\r\n", 44);
+            uart_write_bytes(UART_NUM_0, "[GUIDE] Input item name: ", 25);
+            return;
+        }
+    }
+    
+    // ========== 5c. 等待注册存放区域状态 ==========
+    if (g_camera_state == CAM_STATE_WAITING_REG_AREA) {
+        if (strlen(cmd_buf) == 1 && isalpha((unsigned char)cmd_buf[0])) {
+            extern char g_reg_storage_area;
+            g_reg_storage_area = toupper((unsigned char)cmd_buf[0]);
+            g_camera_state = CAM_STATE_WAITING_REG_QUANTITY;
+            show_registration_quantity_guide();
+            return;
+        } else {
+            uart_write_bytes(UART_NUM_0, "[ERROR] Please input a single letter (A-Z).\r\n", 44);
+            uart_write_bytes(UART_NUM_0, "[GUIDE] Input storage area: ", 28);
+            return;
+        }
+    }
+    
+    // ========== 5d. 等待注册数量状态 ==========
+    if (g_camera_state == CAM_STATE_WAITING_REG_QUANTITY) {
+        // 验证是否为正整数
+        bool valid = true;
+        for (size_t i = 0; i < strlen(cmd_buf); i++) {
+            if (!isdigit((unsigned char)cmd_buf[i])) {
+                valid = false;
+                break;
+            }
+        }
+        
+            if (valid && strlen(cmd_buf) > 0) {
+            extern uint32_t g_reg_quantity;
+            g_reg_quantity = (uint32_t)atoi(cmd_buf);
+            if (g_reg_quantity == 0) {
+                uart_write_bytes(UART_NUM_0, "[ERROR] Quantity must be greater than 0.\r\n", 40);
+                uart_write_bytes(UART_NUM_0, "[GUIDE] Input quantity: ", 24);
+                return;
+            }
+            
+            // ✅ 信息收集完成，设置模式标志为注册模式，初始化硬件
+            extern bool g_is_inventory_mode;
+            extern bool g_is_outbound_mode;
+            g_is_inventory_mode = false;
+            g_is_outbound_mode = false;
+            g_inventory_state = INVENTORY_IDLE;
+            
+            // ✅ 设置期望视图数：注册模式=3 (f+s+t)
+            extern int g_total_views;
+            g_total_views = 3;
+            
+            // LED指示：注册模式
+            extern void led_camera_registration(void);
+            led_camera_registration();
+            
+            // 显示注册信息摘要
+            char summary[384];
+            snprintf(summary, sizeof(summary),
+                     "\r\n========== REGISTRATION SUMMARY ==========\r\n"
+                     "  MAC:          %s\r\n"
+                     "  Item Name:    %s\r\n"
+                     "  Storage Area: %c\r\n"
+                     "  Quantity:     %lu\r\n"
+                     "===========================================\r\n"
+                     "[SYSTEM] Initializing camera...\r\n",
+                     g_current_mac, g_reg_item_name, g_reg_storage_area, (unsigned long)g_reg_quantity);
+            uart_write_bytes(UART_NUM_0, summary, strlen(summary));
+            
+            // 初始化硬件并开始拍摄流程
+            handle_mac_initialization(g_current_mac);
+            
+            // 显示注册第一步引导
+            show_registration_step1(g_current_mac);
+            return;
+        } else {
+            uart_write_bytes(UART_NUM_0, "[ERROR] Please input a valid positive integer.\r\n", 45);
+            uart_write_bytes(UART_NUM_0, "[GUIDE] Input quantity: ", 24);
+            return;
+        }
+    }
+    
+    // ========== 5e. 等待出库MAC地址状态 ==========
+    if (g_camera_state == CAM_STATE_WAITING_OUT_MAC) {
+        if (cmd_handler_validate_mac(cmd_buf)) {
+            // 检查该MAC是否已注册
+            asset_record_t *record = (asset_record_t *)malloc(sizeof(asset_record_t));
+            if (!record) {
+                uart_write_bytes(UART_NUM_0, "[ERROR] Memory allocation failed\r\n", 33);
+                g_camera_state = CAM_STATE_WAITING_MAC;
+                show_main_menu();
+                return;
+            }
+            
+            esp_err_t ret = asset_load(cmd_buf, record);
+            if (ret == ESP_OK) {
+                // 资产存在，显示当前信息
+                char info_msg[320];
+                snprintf(info_msg, sizeof(info_msg),
+                         "\r\n========== OUTBOUND MODE ==========\r\n"
+                         "  MAC: %s\r\n"
+                         "  Item: %s\r\n"
+                         "  Area: %c\r\n"
+                         "  Stock: %lu\r\n"
+                         "===================================\r\n",
+                         record->mac_address, record->item_name, record->storage_area,
+                         (unsigned long)record->quantity);
+                uart_write_bytes(UART_NUM_0, info_msg, strlen(info_msg));
+                
+                // 保存MAC地址
+                snprintf(g_current_mac, MAC_ADDR_LEN + 1, "%s", cmd_buf);
+                
+                free(record);
+                
+                // 进入输入出库数量阶段
+                g_camera_state = CAM_STATE_WAITING_OUT_QTY;
+                uart_write_bytes(UART_NUM_0, "[GUIDE] Input quantity to remove: ", 34);
+                return;
+            } else {
+                free(record);
+                char err_msg[128];
+                snprintf(err_msg, sizeof(err_msg),
+                         "\r\n[ERROR] Asset not found: %s\r\n", cmd_buf);
+                uart_write_bytes(UART_NUM_0, err_msg, strlen(err_msg));
+                uart_write_bytes(UART_NUM_0, "Please register this asset first.\r\n", 36);
+                g_camera_state = CAM_STATE_WAITING_MAC;
+                show_main_menu();
+                return;
+            }
+        } else {
+            uart_write_bytes(UART_NUM_0, "[ERROR] Invalid MAC address format.\r\n", 37);
+            uart_write_bytes(UART_NUM_0, "[GUIDE] Input MAC address: ", 27);
+            return;
+        }
+    }
+    
+    // ========== 5f. 等待出库数量状态 ==========
+    if (g_camera_state == CAM_STATE_WAITING_OUT_QTY) {
+        bool valid = true;
+        for (size_t i = 0; i < strlen(cmd_buf); i++) {
+            if (!isdigit((unsigned char)cmd_buf[i])) {
+                valid = false;
+                break;
+            }
+        }
+        
+        if (valid && strlen(cmd_buf) > 0) {
+            extern uint32_t g_outbound_quantity;
+            g_outbound_quantity = (uint32_t)atoi(cmd_buf);
+            if (g_outbound_quantity == 0) {
+                uart_write_bytes(UART_NUM_0, "[ERROR] Quantity must be greater than 0.\r\n", 40);
+                uart_write_bytes(UART_NUM_0, "[GUIDE] Input quantity to remove: ", 34);
+                return;
+            }
+            
+            // 设置出库模式标志
+            extern bool g_is_inventory_mode;
+            extern bool g_is_outbound_mode;
+            g_is_inventory_mode = false;
+            g_is_outbound_mode = true;
+            g_inventory_state = INVENTORY_IDLE;
+            
+            // ✅ 设置期望视图数：出库模式=1 (仅f)
+            extern int g_total_views;
+            g_total_views = 1;
+            
+            // LED指示
+            extern void led_camera_inventory(void);
+            led_camera_inventory();
+            
+            char summary[320];
+            snprintf(summary, sizeof(summary),
+                     "\r\n========== OUTBOUND ============\r\n"
+                     "  MAC:      %s\r\n"
+                     "  Remove:   %lu\r\n"
+                     "  [STEP 1/1] Capture FRONT view\r\n"
+                     "           -> Send 'f' to capture\r\n"
+                     "====================================\r\n",
+                     g_current_mac, (unsigned long)g_outbound_quantity);
+            uart_write_bytes(UART_NUM_0, summary, strlen(summary));
+            
+            // 初始化硬件
+            handle_mac_initialization(g_current_mac);
+            return;
+        } else {
+            uart_write_bytes(UART_NUM_0, "[ERROR] Please input a valid positive integer.\r\n", 45);
+            uart_write_bytes(UART_NUM_0, "[GUIDE] Input quantity to remove: ", 34);
+            return;
+        }
+    }
+    
     // ========== 6. 等待盘点MAC地址状态 ==========
     if (g_camera_state == CAM_STATE_WAITING_INV_MAC) {
         if (cmd_handler_validate_mac(cmd_buf)) {
             // ✅ 设置模式标志为盘点模式
             extern bool g_is_inventory_mode;
             g_is_inventory_mode = true;
+            
+            // ✅ 设置期望视图数：盘点模式=3 (f+s+t)
+            extern int g_total_views;
+            g_total_views = 3;
             
             // 检查该MAC是否已注册
             asset_record_t *record = (asset_record_t *)malloc(sizeof(asset_record_t));

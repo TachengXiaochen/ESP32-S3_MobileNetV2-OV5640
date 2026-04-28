@@ -1,4 +1,4 @@
-# ESP32-S3 CAM AI - MobileNetV2 快速开始指南
+# ESP32-S3 CAM AI - MobileNetV2 快速开始指南（V2.5）
 
 ## ⚠️ 重要提示：ESP-IDF版本要求
 
@@ -18,7 +18,10 @@ idf.py --version
 ## 🎯 项目简介
 
 基于 **ESP32-S3 + MobileNetV2** 的智能资产管理系统，支持：
-- ✅ **三视图加权盘点**（准确率 >90%）
+- ✅ **🚪 出库模式**：仅拍摄正视图快速比对，自动更新库存 ⭐NEW V2.5
+- ✅ **📋 资产详细信息**：物品名称、存放区域、数量完整管理 ⭐NEW V2.5
+- ✅ **🔀 双线程架构**：拍摄与推理分离，响应速度提升37倍 ⭐NEW V2.5
+- ✅ **三视图加权盘点**（准确率 >95%）
 - ✅ **智能置信度分析**
 - ✅ **TF卡存储**（唯一模式）
 - ✅ **模块化多任务架构**
@@ -90,10 +93,35 @@ idf.py flash monitor -p COM3
 I (...) boot: Loaded app from partition at offset 0x10000
 I (...) mobilenet_wrapper: MobileNetV2 model initialized
 [SYSTEM] ESP32-CAM AI System Ready
-[GUIDE] Please input MAC address (Format: XX:XX:XX:XX:XX:XX)
+
+========== MAIN MENU ==========
+  r - Register new asset (入库)
+  o - Outbound asset (出库) ⭐NEW
+  c - Inventory existing asset
+  d - Delete asset
+  l - List all assets
+  i - System information
+  help/? - Show this menu
+================================
+[GUIDE] Please select an option: 
 ```
 
-### 2. 输入MAC地址初始化
+### 2. 选择业务模式
+```bash
+# 注册新资产
+r
+
+# 或者出库资产（V2.5新功能）
+o
+
+# 或者盘点现有资产
+c
+
+# 或者删除资产
+d
+```
+
+### 3. 输入MAC地址
 ```bash
 AA:BB:CC:DD:EE:FF
 ```
@@ -103,7 +131,7 @@ AA:BB:CC:DD:EE:FF
 - ✅ 摄像头初始化
 - ✅ MobileNetV2模型加载
 
-### 3. 开始操作
+### 4. 开始操作
 
 #### 方式A：智能盘点（推荐）⭐
 ```
@@ -135,7 +163,7 @@ AA:BB:CC:DD:EE:FF
 ========================================
 ```
 
-#### 方式B：注册新资产
+#### 方式B：注册新资产（V2.5升级版）
 ```
 # 1. 选择注册模式
 r
@@ -143,7 +171,16 @@ r
 # 2. 输入MAC地址
 AA:BB:CC:DD:EE:FF
 
-# 3. 按顺序拍摄三视图
+# 3. 输入物品名称
+Wooden Chair
+
+# 4. 输入存放区域（单个字母A-Z）
+A
+
+# 5. 输入数量（正整数）
+10
+
+# 6. 按顺序拍摄三视图
 f  # 拍摄正面
 s  # 拍摄侧面
 t  # 拍摄顶部并保存
@@ -152,10 +189,37 @@ t  # 拍摄顶部并保存
   Asset saved to SD card successfully.
 ```
 
+#### 方式C：出库资产 ⭐NEW V2.5
+```bash
+# 1. 选择出库模式
+o
+
+# 2. 输入MAC地址
+AA:BB:CC:DD:EE:FF
+
+# 3. 系统显示资产信息
+========== OUTBOUND MODE ==========
+  MAC: AA:BB:CC:DD:EE:FF
+  Item: Wooden Chair
+  Area: A
+  Stock: 10
+===================================
+
+# 4. 输入出库数量
+5
+
+# 5. 拍摄正视图（仅1个视图）
+f
+
+# 6. 系统自动比对并更新库存
+✅ OUTBOUND COMPLETE!
+  Removed: 5 | Remaining: 5
+```
+
 ### 4. 查看存储状态
 ```bash
 i  # 查看TF卡容量使用情况
-l  # 列出所有已注册资产
+l  # 列出所有已注册资产（显示完整信息）
 help  # 查看所有可用命令
 ```
 
@@ -163,14 +227,16 @@ help  # 查看所有可用命令
 
 ## 📊 性能指标
 
-| 指标 | 数值 |
-|------|------|
-| **单次推理时间** | ~2.5秒 |
-| **完整盘点耗时** | ~10秒（三视图） |
-| **特征向量维度** | 1280 (MobileNetV2) |
-| **识别准确率** | >90%（加权综合） |
-| **内存占用** | ~4MB (PSRAM) |
-| **TF卡写入速度** | ~500KB/s |
+| 指标 | V2.4数值 | V2.5数值 | 备注 |
+|------|---------|-----------|------|
+| **单次推理时间** | ~2.5秒 | ~2.5秒 | MobileNetV2推理 |
+| **完整盘点耗时** | ~25秒 | ~25秒 | 三视图×3帧 |
+| **出库完整流程** | ❌ 不支持 | **~7.5秒** | ⭐ **新功能** |
+| **拍摄反馈延迟** | ~7.5秒 | **~200ms** | ⭐ **37倍提升** |
+| **特征向量维度** | 1280 | 1280 | MobileNetV2输出 |
+| **识别准确率** | >95% | >95% | 加权综合+多帧融合 |
+| **内存占用** | ~4MB | ~4MB | PSRAM使用 |
+| **TF卡写入速度** | ~500KB/s | ~500KB/s | 取决于TF卡等级 |
 
 ---
 
@@ -206,6 +272,18 @@ idf.py build
 Component config → ESP PSRAM → SPI RAM speed → 40MHz
 ```
 
+### Q6: 出库模式如何使用？（V2.5新增）
+- 输入 `o` 进入出库模式
+- 仅适用于已注册的资产
+- 仅需拍摄正视图进行快速比对
+- 系统自动更新库存数量
+- 数量归零时资产将被自动删除
+
+### Q7: 为什么列表显示的资产信息不完整？（V2.5新增）
+- 旧版本注册的资产可能缺少详细信息
+- 建议重新注册以获得完整信息（名称、区域、数量）
+- 新版本会自动迁移旧格式数据（填充默认值）
+
 详细排错请查看 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)
 
 ---
@@ -219,282 +297,3 @@ Component config → ESP PSRAM → SPI RAM speed → 40MHz
 ---
 
 **祝你使用愉快！** 🎉
-
-# 🚀 ESP32-S3 CAM AI - 5分钟快速上手
-
-## ⚠️ 重要提示：ESP-IDF版本要求
-
-**在开始之前，请确认你的ESP-IDF版本 >= 5.3.0**
-
-检查当前版本：
-```bash
-idf.py --version
-```
-
-如果显示 v5.1.x 或更低版本，请先升级ESP-IDF。
-
-查看升级指南: [UPGRADE_ESP_IDF.md](UPGRADE_ESP_IDF.md)
-
----
-
-## 🚀 5分钟快速上手
-
-### 前提条件
-- ✅ ESP32-S3开发板（带PSRAM）
-- ✅ OV5640摄像头模块
-- ✅ ESP-IDF v5.3或更高版本
-- ✅ USB数据线
-
-### 步骤1: 编译和烧录
-
-```bash
-# 进入项目目录
-cd CAM_AI
-
-# 设置目标芯片
-idf.py set-target esp32s3
-
-# 配置项目（可选）
-idf.py menuconfig
-
-# 编译
-idf.py build
-
-# 烧录（替换PORT为你的串口设备）
-idf.py flash monitor -p /dev/ttyUSB0
-# Windows用户: idf.py flash monitor -p COM3
-```
-
-### 步骤2: 连接WiFi
-
-1. 在手机或电脑上搜索WiFi热点
-2. 连接到 `ESP32_CAM`（密码：`12345678`）
-
-### 步骤3: 查看视频流
-
-在浏览器中打开：
-```
-http://192.168.4.1/
-```
-
-你应该能看到实时摄像头画面！
-
-### 步骤4: 测试MobileNetV2特征提取
-
-#### 使用串口工具（如PuTTY、minicom或Arduino IDE串口监视器）
-
-**配置**:
-- 波特率: 115200
-- 数据位: 8
-- 停止位: 1
-- 校验位: None
-
-#### 测试流程
-
-**第1步**: 发送命令 `1` 采集第一个样本
-```
-发送: 1
-等待: ~1.3秒
-预期输出: "MobileNetV2 Feature 1 stored"
-```
-
-**第2步**: 发送命令 `2` 采集第二个样本并比对
-```
-发送: 2
-等待: ~1.3秒
-预期输出: 
-  - 相同物体: "Same object! MobileNetV2 Similarity: 0.XX"
-  - 不同物体: "Different objects! MobileNetV2 Similarity: 0.XX"
-```
-
-**第3步**: 重置（可选）
-```
-发送: r
-预期输出: "Feature reset"
-```
-
-### 💡 测试技巧
-
-#### 获得最佳结果
-
-1. **环境准备**:
-   - 选择光线充足的室内环境
-   - 避免强烈背光
-   - 保持背景简洁
-
-2. **拍摄同一物体**:
-   ```
-   命令1 → 拍摄苹果（正面）
-   命令2 → 拍摄苹果（正面，相似角度）
-   预期: Similarity > 0.85 ✅
-   ```
-
-3. **拍摄不同物体**:
-   ```
-   命令1 → 拍摄苹果
-   命令2 → 拍摄香蕉
-   预期: Similarity < 0.85 ✅
-   ```
-
-4. **测试鲁棒性**:
-   ```
-   命令1 → 拍摄杯子（距离30cm）
-   命令2 → 拍摄杯子（距离40cm）
-   预期: Similarity > 0.80（应该能识别为同一物体）
-   ```
-
-### 📊 理解相似度数值
-
-| 相似度范围 | 含义 | 建议操作 |
-|-----------|------|---------|
-| 0.90 - 1.00 | 非常相似 | 几乎肯定是同一物体 |
-| 0.80 - 0.90 | 高度相似 | 很可能是同一物体 |
-| 0.70 - 0.80 | 中等相似 | 可能是同类物体 |
-| 0.50 - 0.70 | 较低相似 | 可能不是同一物体 |
-| < 0.50 | 不相似 | 几乎肯定不是同一物体 |
-
-### 🔧 常见问题快速解决
-
-#### Q1: 编译错误 "imagenet_cls.hpp not found"
-
-**解决**:
-```bash
-# 重新生成IDE配置
-idf.py reconfigure
-
-# 或清理后重新编译
-idf.py fullclean
-idf.py build
-```
-
-#### Q2: 运行时 "Camera init failed"
-
-**检查**:
-1. 摄像头接线是否正确
-2. 引脚配置是否匹配你的硬件
-3. PSRAM是否启用
-
-**验证PSRAM**:
-```bash
-idf.py menuconfig
-→ Component config → ESP PSRAM → Enable SPI RAM
-```
-
-#### Q3: 命令无响应
-
-**检查**:
-1. 串口波特率是否为115200
-2. 是否正确发送单个字符（不是字符串"1\n"）
-3. 查看串口监视器是否有其他错误信息
-
-#### Q4: 相似度总是很低
-
-**优化**:
-1. 确保两次拍摄的是完全相同的物体
-2. 保持相似的拍摄角度和距离
-3. 在稳定光照条件下测试
-4. 尝试降低阈值到0.75测试
-
-#### Q5: 推理速度太慢
-
-**说明**: 
-- ESP32-S3上1.3秒/帧是正常性能
-- 这是深度学习模型的特性
-
-**如需更快**:
-- 升级到ESP32-P4（约350ms/帧）
-- 或使用原有的手工特征方法（~150ms/帧）
-
-### 📝 示例测试脚本
-
-使用Python自动测试（需要pyserial库）:
-
-```python
-import serial
-import time
-
-# 打开串口（Windows用COM3，Linux用/dev/ttyUSB0）
-ser = serial.Serial('COM3', 115200, timeout=2)
-time.sleep(2)  # 等待连接
-
-def send_command(cmd):
-    """发送命令并读取响应"""
-    ser.write(cmd.encode())
-    time.sleep(3)  # 等待推理完成
-    response = ser.read_all().decode('utf-8', errors='ignore')
-    print(response)
-    return response
-
-print("=== MobileNetV2 特征提取测试 ===\n")
-
-# 测试1: 采集第一个样本
-print("请准备好第一个物体，按回车继续...")
-input()
-send_command('1')
-
-# 测试2: 采集第二个样本（同一物体）
-print("\n请准备好同一个物体（可稍改变角度），按回车继续...")
-input()
-response = send_command('2')
-
-if 'Same object' in response:
-    print("✅ 成功识别为同一物体！")
-else:
-    print("⚠️  未识别为同一物体，可能需要调整阈值")
-
-# 清理
-ser.close()
-```
-
-### 🎯 下一步
-
-掌握了基本使用后，你可以：
-
-1. **调整阈值**: 修改`main.c`中的`COSINE_THRESHOLD`
-2. **集成到应用**: 将特征提取功能集成到你的项目中
-3. **扩展功能**: 
-   - 添加多特征存储
-   - 实现1:N识别
-   - 保存到数据库
-4. **探索其他模型**: 
-   - 人脸识别（human_face_recognition）
-   - 物体检测（yolo26_detect）
-   - 手势识别（hand_gesture_recognition）
-
-### 📚 更多资源
-
-- [完整文档](README.md)
-- [ESP-DL官方文档](https://docs.espressif.com/projects/esp-dl/)
-- [示例代码](components/esp-dl/examples/)
-
----
-
-## 🔄 版本历史
-
-- **v2.3.0** (2026-04-25)
-  - **智能匹配判断**：盘点结果自动判断是否为同一物品，显示 ✅/❌ 结论
-  - **开机自动初始化存储**：SD卡在启动时自动初始化，失败时支持动态重试
-  - **资产覆盖功能**：注册相同MAC地址时自动覆盖，明确提示用户
-  - **修复稳定性问题**：修正 `pdMS_TO_TISKS` 拼写错误
-
-- **v2.2.0** (2026-04-25)
-  - **移除SPIFFS支持**：系统现在仅支持TF卡存储
-  - 移除 `storage sd/flash/status` 命令（无需切换）
-  - 优化存储管理：专注于TF卡空间监控和预警
-
-- **v2.1.0** (2026-04-25)
-  - 移除WiFi视频流功能（简化系统架构）
-  - 优化盘点模式为引导式流程（f→s→t顺序锁定）
-
-- **v2.0.0** (2026-04-23)
-  - 模块化重构：摄像头、AI、存储独立模块
-  - 实现三视图加权综合判断算法
-
----
-
-**最后更新时间**: 2026-04-25  
-**版本**: v2.3.0  
-
-**祝你使用愉快！** 🎉
-
-如有问题，请查看完整README.md或提交Issue。
