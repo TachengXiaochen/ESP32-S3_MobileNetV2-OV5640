@@ -5,6 +5,7 @@
 #include "dl_image.hpp"
 #include "imagenet_cls.hpp"
 #include "feature_processor.h"  // 温度缩放功能
+#include "blur_detection.h"    // 模糊度检测
 #include <cstring>
 #include <map>
 
@@ -94,6 +95,25 @@ extern "C" bool mobilenet_extract_features(float *feature_vec, int feature_size)
     }
     
     ESP_LOGI(TAG, "JPEG decoded successfully: %dx%d", input_img.width, input_img.height);
+
+    // 模糊度检测：在推理前检查图像清晰度
+    ESP_LOGI(TAG, "Checking image sharpness...");
+    image_t img_for_blur_detect = {
+        .data = static_cast<uint8_t*>(input_img.data),
+        .width = input_img.width,
+        .height = input_img.height,
+        .channels = 3  // RGB888
+    };
+    
+    if (!blur_detect_is_sharp_default(&img_for_blur_detect)) {
+        ESP_LOGW(TAG, "Image is too blurry, discarding frame");
+        // 释放JPEG解码内存
+        free(input_img.data);
+        esp_camera_fb_return(fb);
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "Image is sharp enough for feature extraction");
 
     ESP_LOGI(TAG, "Running MobileNetV2 inference...");
 

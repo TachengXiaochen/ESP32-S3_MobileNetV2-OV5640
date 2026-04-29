@@ -1,4 +1,4 @@
-# ESP32-S3 CAM AI 快速参考卡 V2.5
+# ESP32-S3 CAM AI 快速参考卡 V2.6
 
 ## 📌 常用命令速查
 
@@ -44,6 +44,8 @@ t                    # 拍摄顶部视图并保存 (Top)
 **覆盖提示**：
 - 首次注册：`Asset saved to SD card successfully.`
 - 覆盖更新：`Asset UPDATED (overwritten) on SD card.`
+
+**智能检测**：系统会自动检测图像模糊度，模糊图像将被自动丢弃并重拍 ⭐NEW V2.6
 
 ### 🚪 出库模式 ⭐NEW V2.5
 ```bash

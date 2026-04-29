@@ -35,12 +35,7 @@ extern bool g_storage_ready;
 #define MAC_ADDR_LEN 17
 #endif
 
-// 特征向量大小常量 (如果未在头文件中定义)
-// 注意：请根据实际模型输出维度调整此值 (例如 MobileNet v1 可能是 128, 512, 1024 等)
-#ifndef FEATURE_VEC_SIZE
-#define FEATURE_VEC_SIZE 128
-#endif
-
+// 特征向量大小由 asset_manager.h 统一定义 (FEATURE_VEC_SIZE = 1280)
 /**
  * @brief 验证MAC地址格式
  */
