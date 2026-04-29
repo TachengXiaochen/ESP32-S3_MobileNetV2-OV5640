@@ -27,6 +27,7 @@
 #include "cmd_handler.h"
 #include "led_indicator.h"
 #include "feature_processor.h"
+#include "protocol_handler.h"
 #include "main.h"
 
 // ========== FreeRTOS 任务与队列定义 ==========
@@ -793,6 +794,9 @@ void app_main(void)
     fflush(stdout);
     
     ESP_LOGI(TAG, "[SYSTEM] ESP32-CAM AI System Ready");
+    
+    // 初始化WS63协议处理器
+    protocol_handler_init();
     
     xTaskCreate(uart_task, "uart_task", 4096, NULL, 5, NULL);
     xTaskCreate(camera_ai_task, "camera_ai_task", 8192, NULL, 5, NULL);

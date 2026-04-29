@@ -4,7 +4,7 @@
 
 本系统实现了基于 **MAC地址** 的资产管理功能，支持**三视图（正面、侧面、顶部）**拍照注册和**智能盘点比对**。系统采用**模块化架构**和**多任务并发设计**，通过 **MobileNetV2 深度学习模型**实现高精度物品识别。
 
-### ✨ 核心特性（V2.6完整版）
+### ✨ 核心特性（V3.0完整版）
 
 1. **MAC地址管理**：通过串口输入MAC地址，验证通过后才启动摄像头
 2. **🚪 出库模式** ⭐NEW V2.5：仅拍摄正视图快速比对，自动更新库存数量
@@ -16,10 +16,11 @@
 8. **🎯 多帧融合** ⭐NEW：每次拍摄采集3帧图像，提升准确率5-8%
 9. **📊 混合相似度** ⭐NEW：结合余弦和欧氏距离，提供更鲁棒的匹配评估
 10. **🔍 模糊度检测** ⭐NEW V2.6：拉普拉斯方差算法自动过滤模糊图像，提升特征质量
-11. **TF卡存储**：使用 MicroSD/TF 卡存储所有资产数据
-12. **实时置信度反馈**：每次推理提供置信度评分，量化识别质量
-13. **存储空间监控**：实时监控TF卡使用情况，多级预警机制
-14. **🚪 强制退出** ⭐NEW：任何状态下输入 `exit` 立即返回主菜单
+11. **📡 WS63协议支持** ⭐NEW V3.0：JSON格式UART通信，支持主控设备远程调度
+12. **TF卡存储**：使用 MicroSD/TF 卡存储所有资产数据
+13. **实时置信度反馈**：每次推理提供置信度评分，量化识别质量
+14. **存储空间监控**：实时监控TF卡使用情况，多级预警机制
+15. **🚪 强制退出** ⭐NEW：任何状态下输入 `exit` 立即返回主菜单
 
 ---
 
@@ -476,6 +477,202 @@ LED变为红色常亮
 
 ---
 
+## 📡 WS63 协议使用说明 ⭐NEW V3.0
+
+### 概述
+
+WS63 协议是 ESP32-S3 与主控设备（WS63）之间的通信协议，通过 UART1 接口进行 JSON 格式的命令交互。该协议支持远程调度、实时进度上报和状态管理。
+
+### 硬件连接
+
+| 信号 | ESP32-S3 引脚 | WS63 引脚 | 方向 | 说明 |
+|------|-------------|----------|------|------|
+| UART TX | **GPIO17** | RX | ESP32 → WS63 | JSON数据发送 |
+| UART RX | **GPIO18** | TX | WS63 → ESP32 | JSON命令接收 |
+| RTC 唤醒 | **GPIO2** | GPIO (推挽输出) | WS63 → ESP32 | 拉高唤醒ESP32 |
+| GND | GND | GND | — | 共地 |
+
+**通信参数**：
+- 波特率：115200 bps
+- 数据位：8
+- 停止位：1
+- 校验位：无
+- 帧格式：JSON Lines（每行一个JSON对象，以`\n`结尾）
+
+### 支持的命令类型
+
+#### 业务命令
+
+| 命令 | 功能 | 示例 |
+|------|------|------|
+| `register` | 入库注册（初始化+等待拍摄） | `{"cmd":"register","mac":"AA:BB:CC:DD:EE:FF","item_name":"扳手","storage_area":"A","quantity":50}` |
+| `inventory` | 盘点比对（加载特征+等待拍摄） | `{"cmd":"inventory","mac":"AA:BB:CC:DD:EE:FF"}` |
+| `outbound` | 出库核验（验证资产+等待拍摄） | `{"cmd":"outbound","mac":"AA:BB:CC:DD:EE:FF","remove_qty":10}` |
+| `capture` | 单步拍摄视图 | `{"cmd":"capture","view":"front"}` |
+| `delete` | 删除资产 | `{"cmd":"delete","mac":"AA:BB:CC:DD:EE:FF"}` |
+
+#### 控制命令
+
+| 命令 | 功能 | 示例 |
+|------|------|------|
+| `cancel` | 取消当前任务 | `{"cmd":"cancel"}` |
+
+#### 查询命令
+
+| 命令 | 功能 | 示例 |
+|------|------|------|
+| `list_assets` | 查询资产列表 | `{"cmd":"list_assets"}` |
+| `get_asset` | 查询单个资产详情 | `{"cmd":"get_asset","mac":"AA:BB:CC:DD:EE:FF"}` |
+| `sys_info` | 查询系统信息 | `{"cmd":"sys_info"}` |
+| `ping` | 心跳检测 | `{"cmd":"ping"}` |
+
+### 上行消息类型
+
+| 类型 | 说明 | 触发时机 |
+|------|------|---------|
+| `capture_progress` | 拍摄进度 | 每个视图拍摄完成后 |
+| `task_done` | 任务完成 | 所有视图拍摄完成并处理后 |
+| `asset_list` | 资产列表 | 响应`list_assets`命令 |
+| `asset_detail` | 资产详情 | 响应`get_asset`命令 |
+| `sys_info` | 系统信息 | 响应`sys_info`命令 |
+| `pong` | 心跳响应 | 响应`ping`命令 |
+| `error` | 错误报告 | 发生错误时主动上报 |
+
+### 典型工作流程
+
+#### 入库注册流程（分步交互）
+
+```
+// 1. WS63下发注册命令
+{"cmd":"register","mac":"AA:BB:CC:DD:EE:FF","item_name":"扳手","storage_area":"A","quantity":50}
+
+// 2. ESP32返回初始化完成（不拍摄，只初始化硬件）
+{"type":"capture_progress","mac":"AA:BB:CC:DD:EE:FF","view":"none","step":"0/3","status":"ready"}
+
+// 3. WS63控制拍摄正视图
+{"cmd":"capture","view":"front"}
+
+// 4. ESP32返回拍摄进度
+{"type":"capture_progress","mac":"AA:BB:CC:DD:EE:FF","view":"front","step":"1/3","status":"ok","blur_score":87.3,"feature_size":1280}
+
+// 5. WS63控制拍摄侧视图
+{"cmd":"capture","view":"side"}
+
+// 6. ESP32返回拍摄进度
+{"type":"capture_progress","mac":"AA:BB:CC:DD:EE:FF","view":"side","step":"2/3","status":"ok","blur_score":91.2,"feature_size":1280}
+
+// 7. WS63控制拍摄俯视图（最后一个视图自动触发融合+保存）
+{"cmd":"capture","view":"top"}
+
+// 8. ESP32返回拍摄进度
+{"type":"capture_progress","mac":"AA:BB:CC:DD:EE:FF","view":"top","step":"3/3","status":"ok","blur_score":84.6,"feature_size":1280}
+
+// 9. ESP32返回任务完成结果
+{"type":"task_done","task":"register","result":"success","mac":"AA:BB:CC:DD:EE:FF","item_name":"扳手","storage_area":"A","quantity":50,"is_overwrite":false,"file_size_kb":45}
+```
+
+#### 盘点比对流程
+
+```
+// 1. WS63下发盘点命令
+{"cmd":"inventory","mac":"AA:BB:CC:DD:EE:FF"}
+
+// 2. ESP32加载参考特征并初始化硬件
+{"type":"capture_progress","mac":"AA:BB:CC:DD:EE:FF","view":"none","step":"0/3","status":"ready"}
+
+// 3-8. WS63依次发送3个capture命令（同注册流程）
+
+// 9. ESP32返回盘点结果
+{"type":"task_done","task":"inventory","result":"success","mac":"AA:BB:CC:DD:EE:FF","is_match":true,"weighted_confidence":0.892,"front_confidence":0.91,"side_confidence":0.88,"top_confidence":0.85,"threshold":0.75,"item_name":"扳手","storage_area":"A","quantity":50}
+```
+
+#### 出库核验流程（仅需1个视图）
+
+```
+// 1. WS63下发出库命令
+{"cmd":"outbound","mac":"AA:BB:CC:DD:EE:FF","remove_qty":10}
+
+// 2. ESP32验证资产存在并初始化硬件
+{"type":"capture_progress","mac":"AA:BB:CC:DD:EE:FF","view":"none","step":"0/1","status":"ready"}
+
+// 3. WS63控制拍摄正视图（仅需1个视图）
+{"cmd":"capture","view":"front"}
+
+// 4. ESP32返回拍摄进度
+{"type":"capture_progress","mac":"AA:BB:CC:DD:EE:FF","view":"front","step":"1/1","status":"ok","blur_score":93.5,"feature_size":1280}
+
+// 5. ESP32返回出库结果（自动扣减库存）
+{"type":"task_done","task":"outbound","result":"success","mac":"AA:BB:CC:DD:EE:FF","is_match":true,"confidence":0.93,"threshold":0.75,"item_name":"扳手","original_qty":50,"remove_qty":10,"remaining_qty":40,"asset_deleted":false}
+```
+
+### 错误处理
+
+当发生错误时，ESP32会主动上报错误信息：
+
+```
+{"type":"error","code":"INVALID_JSON","msg":"Invalid JSON format"}
+{"type":"error","code":"UNKNOWN_CMD","msg":"Unknown command"}
+{"type":"error","code":"MISSING_FIELD","msg":"Missing required field"}
+{"type":"error","code":"INVALID_MAC","msg":"Invalid MAC address format"}
+{"type":"error","code":"ASSET_NOT_FOUND","msg":"Asset not found for MAC: AA:BB:CC:DD:EE:FF"}
+{"type":"error","code":"NOT_INITIALIZED","msg":"Hardware not initialized, send register/inventory/outbound first"}
+{"type":"error","code":"TASK_BUSY","msg":"Previous task is still running"}
+```
+
+**常见错误码**：
+
+| 错误码 | 说明 | 解决方法 |
+|--------|------|---------|
+| `INVALID_JSON` | JSON解析失败 | 检查JSON格式是否正确 |
+| `UNKNOWN_CMD` | 未知命令 | 确认命令名称拼写正确 |
+| `MISSING_FIELD` | 缺少必填字段 | 检查命令是否包含所有必需字段 |
+| `INVALID_MAC` | MAC地址格式错误 | 确保MAC地址为XX:XX:XX:XX:XX:XX格式 |
+| `ASSET_NOT_FOUND` | 资产不存在 | 确认MAC地址已注册 |
+| `NOT_INITIALIZED` | 硬件未初始化 | 先发送register/inventory/outbound命令 |
+| `TASK_BUSY` | 任务忙 | 等待当前任务完成或发送cancel命令 |
+
+### 状态机说明
+
+ESP32内部维护5种工作状态：
+
+1. **IDLE**：空闲状态，等待命令
+2. **INITIALIZING**：收到register/inventory/outbound，正在初始化硬件
+3. **WAITING_CAPTURE**：初始化完成，等待capture命令
+4. **CAPTURING**：正在执行拍摄+推理
+5. **FINALIZING**：最后一个view完成，正在做最终保存/匹配
+
+**状态转换规则**：
+- IDLE → INITIALIZING：收到register/inventory/outbound/delete命令
+- INITIALIZING → WAITING_CAPTURE：硬件初始化完成
+- WAITING_CAPTURE → CAPTURING：收到capture命令
+- CAPTURING → FINALIZING：最后一个视图拍摄完成
+- FINALIZING → IDLE：任务完成或失败
+- 任意状态 → IDLE：收到cancel命令
+
+### 技术实现细节
+
+**模块文件**：
+- [protocol_handler.c](main/protocol_handler.c) / [protocol_handler.h](main/protocol_handler.h) - 协议处理器
+- UART配置：UART_NUM_1, GPIO17(TX), GPIO18(RX), 115200 baud
+- 接收任务：独立FreeRTOS任务（优先级5），异步接收解析JSON命令
+
+**关键特性**：
+- ✅ **异步非阻塞**：UART接收在独立任务中运行，不影响其他功能
+- ✅ **看门狗保护**：长耗时操作前后调用`esp_task_wdt_reset()`
+- ✅ **内存管理**：动态分配JSON缓冲区，使用后及时释放
+- ✅ **错误容错**：JSON解析失败返回明确错误码，不会崩溃
+
+**兼容性说明**：
+- ✅ 保留原有 CLI 模式（UART0调试接口，GPIO43/44）
+- ✅ 双模式并行：可通过UART0进行本地调试，UART1与WS63通信
+- ✅ 向后兼容：不影响现有功能和数据结构
+
+### 完整协议文档
+
+详细的协议规范请参考：[docs/WS63_ESP32_PROTOCOL.md](docs/WS63_ESP32_PROTOCOL.md)
+
+---
+
 ## 💡 LED状态指示说明 ⭐NEW
 
 ### LED颜色含义
@@ -784,6 +981,17 @@ CAM_STATE_WAITING_DEL_CONFIRM
 
 ## 📝 版本历史
 
+- **V3.0** (2026-04-29) ⭐NEW
+  - **📡 WS63协议支持**：完整实现WS63 ↔ ESP32-S3通信协议，支持JSON格式UART远程调度
+  - **分步交互模式**：硬件初始化与拍摄分离，WS63完全控制拍摄节奏（capture命令）
+  - **实时进度上报**：每个视图拍摄后主动推送`capture_progress`消息
+  - **任务结果上报**：所有视图完成后自动返回`task_done`结果
+  - **查询接口支持**：资产列表、系统信息、心跳检测等查询命令
+  - **状态机管理**：5种工作状态（IDLE/INITIALIZING/WAITING_CAPTURE/CAPTURING/FINALIZING）
+  - **错误码体系**：17种标准错误码，完善的错误上报机制
+  - **双模式并行**：保留原有CLI调试模式（UART0），新增WS63通信模式（UART1）
+  - **协议文档**：新增 [docs/WS63_ESP32_PROTOCOL.md](docs/WS63_ESP32_PROTOCOL.md) 完整协议规范
+
 - **V2.5** (2026-04-28) ⭐NEW
   - **🚪 出库模式**：专门用于资产出库管理，仅拍摄正视图快速比对，自动更新库存数量
   - **📋 资产详细信息管理**：注册时收集物品名称、存放区域和数量，列表完整展示
@@ -838,6 +1046,6 @@ CAM_STATE_WAITING_DEL_CONFIRM
 
 ---
 
-**最后更新时间**: 2026-04-28  
-**版本**: V2.5 (出库模式与多线程优化版)  
+**最后更新时间**: 2026-04-29  
+**版本**: V3.0 (WS63协议完整版)  
 **维护者**: ESP32-S3 CAM AI Team

@@ -282,6 +282,7 @@ void show_inventory_step3(void)
 /**
  * @brief 显示注册完成提示
  */
+__attribute__((unused))
 static void show_registration_complete(const char *mac)
 {
     char msg[256];
@@ -300,6 +301,7 @@ static void show_registration_complete(const char *mac)
 /**
  * @brief 显示盘点结果并返回主菜单
  */
+__attribute__((unused))
 static void show_inventory_result(float conf_front, float conf_side, float conf_top, 
                                   float weighted_conf, const char *mac)
 {
@@ -324,6 +326,7 @@ static void show_inventory_result(float conf_front, float conf_side, float conf_
 /**
  * @brief 显示存储未初始化错误
  */
+__attribute__((unused))
 static void show_storage_not_ready(void)
 {
     const char *msg = 

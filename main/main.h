@@ -4,7 +4,30 @@
 #include <stdbool.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "driver/gpio.h"  // GPIO引脚定义
 #include "asset_manager.h"
+#include "protocol_handler.h"
+
+// ========== WS63 协议配置 ==========
+// UART1 配置 (GPIO17: TX, GPIO18: RX)
+#define WS63_UART_NUM           UART_NUM_1
+#define WS63_UART_TX_PIN        GPIO_NUM_17
+#define WS63_UART_RX_PIN        GPIO_NUM_18
+#define WS63_UART_BAUD_RATE     115200
+#define WS63_UART_BUF_SIZE      1024
+#define WS63_UART_QUEUE_SIZE    10
+
+// WS63 协议缓冲区大小
+#define WS63_JSON_BUF_SIZE      2048
+#define WS63_MAC_ADDR_LEN       17  // "XX:XX:XX:XX:XX:XX" + null terminator
+
+// WS63 任务配置
+#define WS63_TASK_STACK_SIZE    4096
+#define WS63_TASK_PRIORITY      5
+
+// WS63 协议超时配置（单位：毫秒）
+#define WS63_RESPONSE_TIMEOUT   5000
+#define WS63_CAPTURE_TIMEOUT    10000
 
 #ifdef __cplusplus
 extern "C" {
@@ -48,13 +71,8 @@ typedef enum {
     CAM_STATE_READY = 11              // 就绪状态，可以拍摄
 } camera_state_t;
 
-// 视图状态枚举
-typedef enum {
-    VIEW_NONE = 0,
-    VIEW_FRONT = 1,
-    VIEW_SIDE = 2,
-    VIEW_TOP = 3
-} view_state_t;
+// 视图状态枚举（已在protocol_handler.h中定义为capture_view_t）
+typedef capture_view_t view_state_t;
 
 // 盘点状态枚举
 typedef enum {

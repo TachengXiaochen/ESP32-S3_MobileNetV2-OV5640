@@ -17,6 +17,90 @@ AA:BB:CC:DD:EE:FF    # 输入MAC地址（选择模式后输入）
 
 **注意**：系统在启动时自动初始化TF卡，无需手动切换存储模式。
 
+---
+
+## 📡 WS63 协议快速参考 ⭐NEW V3.0
+
+### 硬件连接
+- **UART TX**: GPIO17 → WS63 RX
+- **UART RX**: GPIO18 ← WS63 TX
+- **RTC唤醒**: GPIO2 ← WS63 GPIO
+- **波特率**: 115200 bps
+- **帧格式**: JSON Lines（每行一个JSON对象，以`\n`结尾）
+
+### 核心命令速查
+
+#### 业务命令（下行 WS63 → ESP32）
+```json
+{"cmd":"register","mac":"AA:BB:CC:DD:EE:FF","item_name":"扳手","storage_area":"A","quantity":50}
+{"cmd":"inventory","mac":"AA:BB:CC:DD:EE:FF"}
+{"cmd":"outbound","mac":"AA:BB:CC:DD:EE:FF","remove_qty":10}
+{"cmd":"capture","view":"front"}  // front/side/top
+{"cmd":"delete","mac":"AA:BB:CC:DD:EE:FF"}
+```
+
+#### 控制命令
+```json
+{"cmd":"cancel"}  // 取消当前任务
+```
+
+#### 查询命令
+```json
+{"cmd":"list_assets"}
+{"cmd":"get_asset","mac":"AA:BB:CC:DD:EE:FF"}
+{"cmd":"sys_info"}
+{"cmd":"ping"}
+```
+
+### 上行消息类型（ESP32 → WS63）
+
+| 类型 | 说明 | 示例 |
+|------|------|------|
+| `capture_progress` | 拍摄进度 | `{"type":"capture_progress","view":"front","step":"1/3","status":"ok","blur_score":87.3}` |
+| `task_done` | 任务完成 | `{"type":"task_done","task":"register","result":"success",...}` |
+| `asset_list` | 资产列表 | `{"type":"asset_list","count":3,"assets":[...]}` |
+| `error` | 错误报告 | `{"type":"error","code":"INVALID_MAC","msg":"..."}` |
+
+### 典型工作流程
+
+#### 入库注册（分步交互）
+```
+WS63发送: {"cmd":"register","mac":"AA:BB:CC:DD:EE:FF","item_name":"扳手","storage_area":"A","quantity":50}
+ESP32回复: {"type":"capture_progress","view":"none","step":"0/3","status":"ready"}
+
+WS63发送: {"cmd":"capture","view":"front"}
+ESP32回复: {"type":"capture_progress","view":"front","step":"1/3","status":"ok","blur_score":87.3}
+
+WS63发送: {"cmd":"capture","view":"side"}
+ESP32回复: {"type":"capture_progress","view":"side","step":"2/3","status":"ok","blur_score":91.2}
+
+WS63发送: {"cmd":"capture","view":"top"}  // 最后一个视图自动触发融合+保存
+ESP32回复: {"type":"capture_progress","view":"top","step":"3/3","status":"ok","blur_score":84.6}
+ESP32回复: {"type":"task_done","task":"register","result":"success","is_overwrite":false,"file_size_kb":45}
+```
+
+### 常见错误码
+
+| 错误码 | 说明 | 解决方法 |
+|--------|------|---------|
+| `INVALID_JSON` | JSON解析失败 | 检查JSON格式 |
+| `UNKNOWN_CMD` | 未知命令 | 确认命令拼写 |
+| `MISSING_FIELD` | 缺少必填字段 | 补全必需字段 |
+| `INVALID_MAC` | MAC格式错误 | 使用XX:XX:XX:XX:XX:XX格式 |
+| `ASSET_NOT_FOUND` | 资产不存在 | 确认MAC已注册 |
+| `NOT_INITIALIZED` | 硬件未初始化 | 先发register/inventory/outbound |
+| `TASK_BUSY` | 任务忙 | 等待或发送cancel |
+
+### 技术要点
+- ✅ **异步非阻塞**：UART接收在独立FreeRTOS任务中运行
+- ✅ **看门狗保护**：长耗时操作调用`esp_task_wdt_reset()`
+- ✅ **双模式并行**：UART0调试 + UART1 WS63通信
+- ✅ **状态机管理**：5种状态确保流程可控
+
+**完整协议文档**：[docs/WS63_ESP32_PROTOCOL.md](docs/WS63_ESP32_PROTOCOL.md)
+
+---
+
 ### 📷 资产注册（四步输入 + 三视图拍摄）⭐V2.5升级
 ```bash
 # 第一步：选择注册模式
@@ -281,6 +365,6 @@ Total: 2 assets
 
 ---
 
-**文档版本**: V2.5  
-**最后更新**: 2026-04-28  
+**文档版本**: V3.0  
+**最后更新**: 2026-04-29  
 **维护者**: ESP32-S3 CAM AI Team
