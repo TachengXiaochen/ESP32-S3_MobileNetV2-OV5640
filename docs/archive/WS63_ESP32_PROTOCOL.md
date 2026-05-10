@@ -1,7 +1,7 @@
 # WS63 ↔ ESP32-S3 通信协议规范
 
-> **文档版本**: v1.0  
-> **最后更新**: 2026-04-29  
+> **文档版本**: v2.0  
+> **最后更新**: 2026-05-09  
 > **适用项目**: CAM_AI (ESP32-S3 视觉感知物资管理子节点)  
 
 ---
@@ -20,6 +20,7 @@
 10. [状态机](#10-状态机)
 11. [预留接口](#11-预留接口)
 12. [附录](#12-附录)
+13. [L610](#13-4g通道扩展l610)
 
 ---
 
@@ -968,5 +969,276 @@ BUSY (register)
 | 版本 | 日期 | 变更内容 |
 |------|------|---------|
 | v1.0 | 2026-04-29 | 初始版本，定义全部上下行命令、帧格式、错误码、状态机 |
+| **v2.0** | **2026-05-09** | **新增第13节 4G通道扩展(L610)，新增mqtt_connect/mqtt_publish/mqtt_disconnect/l610_status/l610_at命令及对应上行消息** |
+
+---
+
+## 13. 4G通道扩展(L610)
+
+### 13.1 概述
+
+L610模块通过UART2 (GPIO19 TX / GPIO20 RX) 与ESP32连接，作为4G MQTT代理。ESP32通过AT指令控制L610，WS63通过UART1下发mqtt命令给ESP32，ESP32转发给L610执行。
+
+**与WiFi的关系：**
+- **WiFi优先**：WS63首先判断WiFi是否可用
+- WiFi可用 → WS63直连MQTT Broker上传
+- WiFi不可用 → WS63通过UART1转发给ESP32 → L610 4G发布
+
+**核心约束：**
+- MQTTUSER凭据（用户名/密码/ClientID）由ESP32固件硬编码，WS63不需要下发
+- L610的AT+MQTTPUB的Payload最大1024字节（ASCII模式）
+- WS63发给ESP32的mqtt命令（mqtt_connect/mqtt_publish等）属于**查询类命令**，即使ESP32正在执行视觉任务也可立即处理
+
+### 13.2 新增下行命令 (WS63 → ESP32)
+
+#### 13.2.1 MQTT连接管理
+
+```json
+// 连接MQTT Broker (4G通道)
+{
+  "cmd": "mqtt_connect",
+  "host": "demo.thingskit.com",
+  "port": 1883,
+  "clean_session": 1,
+  "keepalive": 60
+}
+
+// 断开MQTT连接
+{"cmd":"mqtt_disconnect"}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `cmd` | string | 是 | `"mqtt_connect"` 或 `"mqtt_disconnect"` |
+| `host` | string | 是(mqtt_connect) | MQTT Broker地址 |
+| `port` | uint16 | 是(mqtt_connect) | MQTT Broker端口 |
+| `clean_session` | uint8 | 否 | 0/1，默认1 |
+| `keepalive` | uint16 | 否 | 心跳间隔(秒)，默认60 |
+
+#### 13.2.2 MQTT发布
+
+```json
+{
+  "cmd": "mqtt_publish",
+  "topic": "device/WS63-AA:BB:CC:DD:EE:FF/up",
+  "payload": "{json payload}",
+  "qos": 1,
+  "retain": 0
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `cmd` | string | 是 | 固定值 `"mqtt_publish"` |
+| `topic` | string | 是 | MQTT主题，255字节以内 |
+| `payload` | string | 是 | JSON字符串，**1024字节以内** |
+| `qos` | uint8 | 否 | QoS等级，默认1 |
+| `retain` | uint8 | 否 | retain标志，默认0 |
+
+#### 13.2.3 L610状态查询
+
+```json
+{"cmd":"l610_status"}
+```
+
+**上行响应：** `l610_status` (见§13.3.1)
+
+#### 13.2.4 AT指令透传（调试用）
+
+```json
+{"cmd":"l610_at","at":"AT+CSQ"}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `cmd` | string | 是 | 固定值 `"l610_at"` |
+| `at` | string | 是 | 要透传的AT指令（不含`\r`） |
+
+### 13.3 新增上行消息 (ESP32 → WS63)
+
+#### 13.3.1 L610状态上报
+
+```json
+{
+  "type": "l610_status",
+  "mqtt_state": "connected",
+  "signal_quality": 18
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `type` | string | 固定值 `"l610_status"` |
+| `mqtt_state` | string | `"connected"` / `"disconnected"` / `"connecting"` / `"error"` |
+| `signal_quality` | int | CSQ值(0-31)，99=未知 |
+
+#### 13.3.2 MQTT发布结果
+
+```json
+{
+  "type": "mqtt_publish_done",
+  "result": "success",
+  "topic": "device/WS63-AA:BB:CC:DD:EE:FF/up"
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `type` | string | 固定值 `"mqtt_publish_done"` |
+| `result` | string | `"success"` / `"failed"` |
+| `topic` | string | 发布的Topic |
+
+#### 13.3.3 MQTT连接状态通知
+
+```json
+{
+  "type": "mqtt_connected",
+  "state": "connected",
+  "host": "demo.thingskit.com",
+  "port": 1883
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `type` | string | 固定值 `"mqtt_connected"` |
+| `state` | string | `"connected"` / `"disconnected"` |
+| `host` | string | MQTT Broker地址 |
+| `port` | uint16 | MQTT Broker端口 |
+
+#### 13.3.4 L610错误通知
+
+```json
+{
+  "type": "l610_error",
+  "code": "L610_AT_TIMEOUT",
+  "msg": "L610 not responding"
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `type` | string | 固定值 `"l610_error"` |
+| `code` | string | 错误码，见下表 |
+| `msg` | string | 人类可读的错误描述
+
+| code 取值 | 说明 |
+|-----------|------|
+| `L610_AT_TIMEOUT` | AT指令超时 |
+| `L610_MQTT_CONNECT_FAIL` | MQTT连接失败 |
+| `L610_MQTT_PUBLISH_FAIL` | MQTT发布失败 |
+| `L610_MQTT_LOST_CONNECTION` | MQTT连接意外断开（收到+MQTTBREAK） |
+| `L610_NOT_RESPONDING` | L610模块无响应（连续3次AT超时） |
+
+### 13.4 时序流程：4G通道MQTT发布
+
+```
+WS63                                 ESP32-S3                    ADP-L610
+ │                                      │                          │
+ │  (WiFi不可用, 走4G)                   │                          │
+ │                                      │                          │
+ │  {"cmd":"mqtt_publish",              │                          │
+ │   "topic":"device/WS63-AA:BB/up",    │                          │
+ │   "payload":"{...}"}                 │                          │
+ ├─────────────────────────────────────►│                          │
+ │                                      │                          │
+ │                                      │  AT+MQTTPUB=1,           │
+ │                                      │  "device/WS63-.../up",   │
+ │                                      │  1,0,"{...}"\r           │
+ │                                      ├─────────────────────────►│
+ │                                      │          OK              │
+ │                                      │◄─────────────────────────┤
+ │                                      │                          │
+ │                                      │  +MQTTPUB: 1,1           │
+ │                                      │◄─────────────────────────┤
+ │                                      │                          │
+ │  {"type":"mqtt_publish_done",         │                          │
+ │   "result":"success",                │                          │
+ │   "topic":"device/WS63-AA:BB/up"}    │                          │
+ │◄─────────────────────────────────────┤                          │
+```
+
+### 13.5 L610 MQTT AT指令参考
+
+| 指令 | 功能 |
+|------|------|
+| `AT+MQTTUSER` | 设置ClientID/用户名/密码 |
+| `AT+MQTTOPEN` | 建立MQTT连接 |
+| `AT+MQTTPUB` | 发布消息 |
+| `AT+MQTTCLOSE` | 关闭MQTT连接 |
+| `+MQTTBREAK` | URC意外断开通知（驱动需处理） |
+
+完整语法详见 `docs/L610_4G_INTEGRATION_PLAN.md` 第4节。
+
+### 13.6 云端统一JSON格式 (WiFi/4G共用)
+
+无论走WiFi还是4G，发给ThingsKit的MQTT消息Payload格式完全一致：
+
+```json
+{
+  "device_id": "WS63-AA:BB:CC:DD:EE:FF",
+  "timestamp": 1712345678,
+  "msg_type": "task_done",
+  "task": "inventory",
+  "mac": "AA:BB:CC:DD:EE:FF",
+  "result": "success",
+  "is_match": true,
+  "weighted_confidence": 0.892,
+  "item_name": "扳手",
+  "storage_area": "A",
+  "quantity": 50,
+  "upload_channel": "4g"
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `device_id` | string | 是 | WS63设备标识 |
+| `timestamp` | int64 | 是 | Unix时间戳（秒） |
+| `msg_type` | string | 是 | 消息类型: `"task_done"` / `"error"` / `"status"` / `"pong"` |
+| `upload_channel` | string | 是 | `"wifi"` / `"4g"` |
+| ... | ... | ... | 其余字段与§7对应消息类型一致 |
+
+### 13.7 新增错误码
+
+| 错误码 | 说明 | 触发场景 |
+|--------|------|---------|
+| `L610_AT_TIMEOUT` | L610 AT指令超时 | L610模块未响应 |
+| `L610_MQTT_CONNECT_FAIL` | MQTT连接失败 | L610无法连接MQTT Broker |
+| `L610_MQTT_PUBLISH_FAIL` | MQTT发布失败 | L610发布消息异常 |
+| `L610_MQTT_LOST_CONNECTION` | MQTT连接意外断开 | L610收到+MQTTBREAK URC |
+| `L610_NOT_RESPONDING` | L610模块无响应 | 连续3次AT超时 |
+
+### 13.8 数据流说明
+
+```
+ESP32完成AI推理
+    ↓ task_done (UART1 → WS63)
+WS63收到结果
+    ↓ 组装云端统一JSON
+    ↓ (判断WiFi是否可用)
+    ├─ WiFi可用 → WS63自行MQTT上传 → 结束
+    │
+    └─ WiFi不可用 → {"cmd":"mqtt_publish",
+    │                 "topic":"device/WS63-.../up",
+    │                 "payload":"{...}"}
+    │               ↓ UART1
+    │           ESP32收到
+    │               ↓ UART2 (AT+MQTTPUB)
+    │           L610 → 4G → ThingsKit
+    │               ↓ UART2 (+MQTTPUB: 1,1)
+    │           ESP32回传结果
+    │               ↓ UART1
+    │           WS63收到 {"type":"mqtt_publish_done",...}
+```
+</content>
+<task_progress>
+- [x] 收集硬件信息（ADP板、J3引脚、电平、SIM卡）
+- [x] 收集ThingsKit MQTT信息（broker/username/password）
+- [x] 确认MQTT AT指令语法
+- [x] 更新 docs/L610_4G_INTEGRATION_PLAN.md
+- [x] 更新 docs/WS63_ESP32_PROTOCOL.md (追加v2.0第13节)
+- [ ] 切换到ACT MODE开始写代码
+</task_progress>
 
 

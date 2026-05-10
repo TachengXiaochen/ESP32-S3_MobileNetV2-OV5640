@@ -20,14 +20,15 @@
 #include "sdkconfig.h"
 
 // Modular interfaces
-#include "camera_module.h"
-#include "storage_module.h"
-#include "ai_module.h"
-#include "asset_manager.h"
-#include "cmd_handler.h"
-#include "led_indicator.h"
-#include "feature_processor.h"
-#include "protocol_handler.h"
+#include "modules/camera/camera_module.h"
+#include "modules/system/storage_module.h"
+#include "modules/ai/ai_module.h"
+#include "modules/system/asset_manager.h"
+#include "modules/system/cmd_handler.h"
+#include "modules/system/led_indicator.h"
+#include "modules/ai/feature_processor.h"
+#include "modules/system/protocol_handler.h"
+#include "modules/4g/l610_manager.h"
 #include "main.h"
 
 // ========== FreeRTOS 任务与队列定义 ==========
@@ -797,6 +798,19 @@ void app_main(void)
     
     // 初始化WS63协议处理器
     protocol_handler_init();
+    
+    // 初始化并启动L610 4G模块心跳检测
+    ret = l610_manager_init();
+    if (ret == ESP_OK) {
+        ret = l610_manager_start();
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "L610 4G module heartbeat task started");
+        } else {
+            ESP_LOGW(TAG, "L610 4G module start failed: %s", esp_err_to_name(ret));
+        }
+    } else {
+        ESP_LOGW(TAG, "L610 4G module init failed: %s (4G may be unavailable)", esp_err_to_name(ret));
+    }
     
     xTaskCreate(uart_task, "uart_task", 4096, NULL, 5, NULL);
     xTaskCreate(camera_ai_task, "camera_ai_task", 8192, NULL, 5, NULL);

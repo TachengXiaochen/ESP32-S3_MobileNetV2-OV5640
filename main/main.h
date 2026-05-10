@@ -5,8 +5,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "driver/gpio.h"  // GPIO引脚定义
-#include "asset_manager.h"
-#include "protocol_handler.h"
+#include "modules/system/asset_manager.h"
+#include "modules/system/protocol_handler.h"
 
 // ========== WS63 协议配置 ==========
 // UART1 配置 (GPIO17: TX, GPIO18: RX)

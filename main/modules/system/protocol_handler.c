@@ -1,4 +1,4 @@
-n#include <stdio.h>
+#include <stdio.h>
 #include <string.h>
 #include <ctype.h>
 #include <math.h>
@@ -17,15 +17,20 @@ n#include <stdio.h>
 #include "cJSON.h"
 
 #include "protocol_handler.h"
-#include "camera_module.h"
+#include "../camera/camera_module.h"
 #include "storage_module.h"
-#include "ai_module.h"
+#include "../ai/ai_module.h"
 #include "asset_manager.h"
-#include "feature_processor.h"
-#include "similarity_matcher.h"
-#include "blur_detection.h"
+#include "../ai/feature_processor.h"
+#include "../ai/similarity_matcher.h"
+#include "../ai/blur_detection.h"
 #include "led_indicator.h"
-#include "main.h"
+#include "../../main.h"
+
+// L610 4G模块 (v2.0)
+#include "../4g/l610_manager.h"
+#include "../4g/l610_mqtt.h"
+#include "../4g/l610_driver.h"
 
 static const char *TAG = "protocol_handler";
 
@@ -60,6 +65,13 @@ static float g_ws63_front_feature[FEATURE_VEC_SIZE] = {0};
 static float g_ws63_side_feature[FEATURE_VEC_SIZE] = {0};
 static float g_ws63_top_feature[FEATURE_VEC_SIZE] = {0};
 
+// L610 MQTT连接信息 (用于mqtt_disconnect上报格式)
+static char g_l610_last_host[128] = "unknown";
+static uint16_t g_l610_last_port = 1883;
+
+// ✅ L610 ClientID（动态生成，格式：WS63-{MAC}）
+static char g_l610_client_id[64] = {0};
+
 // ========== 内部函数声明 ==========
 static esp_err_t ws63_uart_init(void);
 static esp_err_t ws63_send_json_raw(const char *json_str);
@@ -73,6 +85,15 @@ static esp_err_t ws63_handle_list_assets(void);
 static esp_err_t ws63_handle_get_asset(cJSON *json_obj);
 static esp_err_t ws63_handle_sys_info(void);
 static esp_err_t ws63_handle_ping(void);
+
+// L610 4G 命令处理函数 (v2.0)
+static esp_err_t ws63_handle_l610_connect(cJSON *json_obj);
+static esp_err_t ws63_handle_l610_disconnect(cJSON *json_obj);
+static esp_err_t ws63_handle_l610_publish(cJSON *json_obj);
+static esp_err_t ws63_handle_l610_status(void);
+static esp_err_t ws63_handle_l610_mqtt_check(void);
+static esp_err_t ws63_handle_l610_at(cJSON *json_obj);
+
 static esp_err_t ws63_validate_mac(const char *mac);
 static ws63_cmd_t ws63_parse_cmd(const char *cmd_str);
 static const char* ws63_get_state_string(void);
@@ -113,6 +134,12 @@ static const char* cmd_strings[] = {
     "get_asset",
     "sys_info",
     "ping",
+    "mqtt_connect",
+    "mqtt_disconnect",
+    "mqtt_publish",
+    "l610_status",
+    "l610_at",
+    "l610_mqtt_check",
     "unknown"
 };
 
@@ -150,6 +177,11 @@ void protocol_handler_init(void)
     if (!feature_processor_init(&config)) {
         ESP_LOGW(TAG, "Feature processor initialization failed");
     }
+    
+    // ✅ 注册L610主动上报回调（用于URC事件通知WS63）
+    extern void l610_manager_register_send_func(void (*)(const char *));
+    l610_manager_register_send_func(ws63_send_json_raw);
+    ESP_LOGI(TAG, "L610 manager send callback registered");
     
     // 创建WS63 UART接收任务
     xTaskCreate(ws63_recv_task, "ws63_recv_task", 4096, NULL, 5, NULL);
@@ -223,6 +255,27 @@ esp_err_t protocol_handle_command(const char *json_str)
         case CMD_PING:
             ret = ws63_handle_ping();
             break;
+
+        // ===== L610 4G 命令 (v2.0) =====
+        case CMD_MQTT_CONNECT:
+            ret = ws63_handle_l610_connect(json_obj);
+            break;
+        case CMD_MQTT_DISCONNECT:
+            ret = ws63_handle_l610_disconnect(json_obj);
+            break;
+        case CMD_MQTT_PUBLISH:
+            ret = ws63_handle_l610_publish(json_obj);
+            break;
+        case CMD_L610_STATUS:
+            ret = ws63_handle_l610_status();
+            break;
+        case CMD_L610_AT:
+            ret = ws63_handle_l610_at(json_obj);
+            break;
+        case CMD_L610_MQTT_CHECK:
+            ret = ws63_handle_l610_mqtt_check();
+            break;
+
         default:
             ESP_LOGE(TAG, "Unknown command: %s", cmd_str);
             ret = ESP_ERR_NOT_SUPPORTED;
@@ -674,6 +727,14 @@ static ws63_cmd_t ws63_parse_cmd(const char *cmd_str)
     if (strcmp(cmd_str, "get_asset") == 0) return CMD_GET_ASSET;
     if (strcmp(cmd_str, "sys_info") == 0) return CMD_SYS_INFO;
     if (strcmp(cmd_str, "ping") == 0) return CMD_PING;
+
+    // L610 4G (v2.0) — 协议文档定义为 mqtt_* 前缀
+    if (strcmp(cmd_str, "mqtt_connect") == 0) return CMD_MQTT_CONNECT;
+    if (strcmp(cmd_str, "mqtt_disconnect") == 0) return CMD_MQTT_DISCONNECT;
+    if (strcmp(cmd_str, "mqtt_publish") == 0) return CMD_MQTT_PUBLISH;
+    if (strcmp(cmd_str, "l610_status") == 0) return CMD_L610_STATUS;
+    if (strcmp(cmd_str, "l610_at") == 0) return CMD_L610_AT;
+    if (strcmp(cmd_str, "l610_mqtt_check") == 0) return CMD_L610_MQTT_CHECK;
     
     return CMD_UNKNOWN;
 }
@@ -766,16 +827,19 @@ static esp_err_t ws63_handle_register(cJSON *json_obj)
     
     // 保存参数到全局变量
     strncpy(g_ws63_mac, mac, sizeof(g_ws63_mac) - 1);
+    g_ws63_mac[sizeof(g_ws63_mac) - 1] = '\0';  // ✅ 确保字符串终止
     strncpy(g_ws63_item_name, item_name, sizeof(g_ws63_item_name) - 1);
+    g_ws63_item_name[sizeof(g_ws63_item_name) - 1] = '\0';
     g_ws63_storage_area = toupper((unsigned char)storage_area_str[0]);
     g_ws63_quantity = quantity;
+    
+    // ✅ 动态生成L610 ClientID（格式：WS63-{MAC}）
+    snprintf(g_l610_client_id, sizeof(g_l610_client_id), "WS63-%s", g_ws63_mac);
+    ESP_LOGI(TAG, "L610 ClientID generated: %s", g_l610_client_id);
+    
     g_ws63_current_task = CMD_REGISTER;
     g_ws63_total_views = 3;  // 注册需要3个视图
     g_ws63_captured_views = 0;
-    
-    // 更新状态
-    g_ws63_state = WS63_STATE_INITIALIZING;
-    
     // 初始化AI模块
     if (!ai_module_init()) {
         char error_buf[256];
@@ -1770,4 +1834,369 @@ void ws63_recv_task(void *pvParameters)
     free(line_buf);
     free(data);
     vTaskDelete(NULL);
+}
+
+// =====================================================================
+// L610 4G 命令处理函数实现 (v2.0)
+// =====================================================================
+
+/**
+ * @brief 处理 mqtt_connect — 连接MQTT Broker (协议§13.2.1)
+ * WS63 → ESP32: {"cmd":"mqtt_connect","host":"xxx","port":1883,"clean_session":1,"keepalive":60}
+ * ESP32 → WS63: 成功: {"type":"mqtt_connected","state":"connected","host":"...","port":1883}
+ *               失败: {"type":"l610_error","code":"L610_MQTT_CONNECT_FAIL","msg":"..."}
+ * 
+ * 代理模式: WS63提供host/port, 其他凭据使用L610硬编码配置
+ */
+static esp_err_t ws63_handle_l610_connect(cJSON *json_obj)
+{
+    // 从JSON中提取MQTT参数 (协议字段名: host)
+    cJSON *host_item      = cJSON_GetObjectItem(json_obj, "host");
+    cJSON *port_item      = cJSON_GetObjectItem(json_obj, "port");
+
+    // host为必填
+    if (!host_item || !cJSON_IsString(host_item)) {
+        char err_buf[256];
+        protocol_generate_error_response(ERR_MISSING_FIELD,
+            "mqtt_connect requires 'host' field",
+            err_buf, sizeof(err_buf));
+        ws63_send_json_raw(err_buf);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    uint16_t port = L610_MQTT_DEFAULT_PORT;
+    if (port_item && cJSON_IsNumber(port_item)) {
+        port = (uint16_t)port_item->valueint;
+    }
+
+    // 保存host/port供mqtt_disconnect上行格式使用
+    strncpy(g_l610_last_host, host_item->valuestring, sizeof(g_l610_last_host) - 1);
+    g_l610_last_host[sizeof(g_l610_last_host) - 1] = '\0';
+    g_l610_last_port = port;
+
+    // 可选参数
+    cJSON *clean_session_item = cJSON_GetObjectItem(json_obj, "clean_session");
+    cJSON *keepalive_item     = cJSON_GetObjectItem(json_obj, "keepalive");
+    uint8_t clean_session = 1;
+    uint16_t keepalive = 60;
+    if (clean_session_item && cJSON_IsNumber(clean_session_item)) {
+        clean_session = (uint8_t)clean_session_item->valueint;
+        if (clean_session > 1) clean_session = 1;
+    }
+    if (keepalive_item && cJSON_IsNumber(keepalive_item)) {
+        keepalive = (uint16_t)keepalive_item->valueint;
+        if (keepalive < 1 || keepalive > 300) keepalive = 60;
+    }
+
+    // 直接调用l610_mqtt_connect (实际API)
+    // ✅ 先设置MQTTUSER，使用动态生成的ClientID
+    extern esp_err_t l610_mqtt_set_user(const char *, const char *, const char *);
+    if (strlen(g_l610_client_id) > 0) {
+        l610_mqtt_set_user(g_l610_client_id, NULL, NULL);
+        ESP_LOGI(TAG, "L610 MQTT user set with ClientID: %s", g_l610_client_id);
+    }
+    
+    esp_err_t ret = l610_mqtt_connect(
+        host_item->valuestring,
+        port,
+        clean_session,
+        keepalive,
+        15    // timeout = 15秒
+    );
+
+    // 按协议§13.3.3生成响应JSON
+    char resp_buf[512];
+    cJSON *resp = cJSON_CreateObject();
+    if (resp) {
+        if (ret == ESP_OK) {
+            cJSON_AddStringToObject(resp, "type", "mqtt_connected");
+            cJSON_AddStringToObject(resp, "state", "connected");
+            cJSON_AddStringToObject(resp, "host", host_item->valuestring);
+            cJSON_AddNumberToObject(resp, "port", port);
+        } else {
+            cJSON_AddStringToObject(resp, "type", "mqtt_error");
+            cJSON_AddStringToObject(resp, "code", "MQTT_CONNECT_FAILED");
+            cJSON_AddStringToObject(resp, "msg", "MQTT connection failed");
+        }
+        char *js = cJSON_PrintUnformatted(resp);
+        if (js) { strncpy(resp_buf, js, sizeof(resp_buf) - 1); free(js); }
+        cJSON_Delete(resp);
+    }
+    ws63_send_json_raw(resp_buf);
+    ESP_LOGI(TAG, "mqtt_connect: host=%s:%u, ret=%d",
+             host_item->valuestring, port, ret);
+    return ret;
+}
+
+/**
+ * @brief 处理 mqtt_disconnect — 断开MQTT连接 (协议§13.2.1)
+ * WS63 → ESP32: {"cmd":"mqtt_disconnect"}
+ * ESP32 → WS63: {"type":"mqtt_connected","state":"disconnected","host":"...","port":1883}
+ */
+static esp_err_t ws63_handle_l610_disconnect(cJSON *json_obj)
+{
+    (void)json_obj;
+
+    esp_err_t ret = l610_mqtt_disconnect(5);
+
+    // 按协议§13.3.3生成响应JSON，使用之前保存的host/port
+    char resp_buf[256];
+    cJSON *resp = cJSON_CreateObject();
+    if (resp) {
+        cJSON_AddStringToObject(resp, "type", "mqtt_connected");
+        cJSON_AddStringToObject(resp, "state", "disconnected");
+        cJSON_AddStringToObject(resp, "host", g_l610_last_host);
+        cJSON_AddNumberToObject(resp, "port", g_l610_last_port);
+        char *js = cJSON_PrintUnformatted(resp);
+        if (js) { strncpy(resp_buf, js, sizeof(resp_buf) - 1); free(js); }
+        cJSON_Delete(resp);
+    }
+    ws63_send_json_raw(resp_buf);
+    return ret;
+}
+
+/**
+ * @brief 处理 mqtt_publish — 发布MQTT消息 (协议§13.2.2)
+ * WS63 → ESP32: {"cmd":"mqtt_publish","topic":"xxx","payload":"xxx","qos":1,"retain":0}
+ * ESP32 → WS63: 成功: {"type":"mqtt_publish_done","result":"success","topic":"..."}
+ *               失败: {"type":"l610_error","code":"L610_MQTT_PUBLISH_FAIL","msg":"..."}
+ */
+static esp_err_t ws63_handle_l610_publish(cJSON *json_obj)
+{
+    cJSON *topic_item   = cJSON_GetObjectItem(json_obj, "topic");
+    cJSON *payload_item = cJSON_GetObjectItem(json_obj, "payload");
+    cJSON *qos_item     = cJSON_GetObjectItem(json_obj, "qos");
+    cJSON *retain_item  = cJSON_GetObjectItem(json_obj, "retain");
+
+    if (!topic_item || !cJSON_IsString(topic_item)) {
+        char err_buf[256];
+        protocol_generate_error_response(ERR_MISSING_FIELD,
+            "mqtt_publish requires 'topic' field",
+            err_buf, sizeof(err_buf));
+        ws63_send_json_raw(err_buf);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 协议§13.2.2: topic ≤ 255 字节
+    size_t topic_len = strlen(topic_item->valuestring);
+    if (topic_len == 0 || topic_len > 255) {
+        char resp_buf[256];
+        cJSON *resp = cJSON_CreateObject();
+        if (resp) {
+            cJSON_AddStringToObject(resp, "type", "l610_error");
+            cJSON_AddStringToObject(resp, "code", "L610_MQTT_PUBLISH_FAIL");
+            cJSON_AddStringToObject(resp, "msg", "Topic length must be 1-255 bytes");
+            char *js = cJSON_PrintUnformatted(resp);
+            if (js) { strncpy(resp_buf, js, sizeof(resp_buf) - 1); free(js); }
+            cJSON_Delete(resp);
+        }
+        ws63_send_json_raw(resp_buf);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (!payload_item || !cJSON_IsString(payload_item)) {
+        char resp_buf[256];
+        cJSON *resp = cJSON_CreateObject();
+        if (resp) {
+            cJSON_AddStringToObject(resp, "type", "l610_error");
+            cJSON_AddStringToObject(resp, "code", "L610_MQTT_PUBLISH_FAIL");
+            cJSON_AddStringToObject(resp, "msg", "mqtt_publish requires 'payload' field");
+            char *js = cJSON_PrintUnformatted(resp);
+            if (js) { strncpy(resp_buf, js, sizeof(resp_buf) - 1); free(js); }
+            cJSON_Delete(resp);
+        }
+        ws63_send_json_raw(resp_buf);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 协议§13.2.2: payload ≤ 1024 字节
+    size_t payload_len = strlen(payload_item->valuestring);
+    if (payload_len > 1024) {
+        char resp_buf[256];
+        cJSON *resp = cJSON_CreateObject();
+        if (resp) {
+            cJSON_AddStringToObject(resp, "type", "l610_error");
+            cJSON_AddStringToObject(resp, "code", "L610_MQTT_PUBLISH_FAIL");
+            cJSON_AddStringToObject(resp, "msg", "Payload exceeds 1024 bytes");
+            char *js = cJSON_PrintUnformatted(resp);
+            if (js) { strncpy(resp_buf, js, sizeof(resp_buf) - 1); free(js); }
+            cJSON_Delete(resp);
+        }
+        ws63_send_json_raw(resp_buf);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    int qos = 1;
+    if (qos_item && cJSON_IsNumber(qos_item)) {
+        qos = qos_item->valueint;
+        if (qos < 0 || qos > 2) qos = 1;
+    }
+
+    uint8_t retain = 0;
+    if (retain_item && cJSON_IsNumber(retain_item)) {
+        retain = (uint8_t)(retain_item->valueint != 0);
+    }
+
+    // 保存topic供上行使用
+    const char *topic = topic_item->valuestring;
+
+    esp_err_t ret = l610_mqtt_publish(
+        topic,
+        payload_item->valuestring,
+        (uint8_t)qos,
+        retain,
+        8           // timeout_sec = 8
+    );
+
+    // 按协议§13.3.2/§13.3.4生成响应JSON
+    char resp_buf[512];
+    cJSON *resp = cJSON_CreateObject();
+    if (resp) {
+        if (ret == ESP_OK) {
+            cJSON_AddStringToObject(resp, "type", "mqtt_publish_done");
+            cJSON_AddStringToObject(resp, "result", "success");
+            cJSON_AddStringToObject(resp, "topic", topic);
+        } else {
+            cJSON_AddStringToObject(resp, "type", "l610_error");
+            cJSON_AddStringToObject(resp, "code", "L610_MQTT_PUBLISH_FAIL");
+            cJSON_AddStringToObject(resp, "msg", "MQTT publish failed");
+        }
+        char *js = cJSON_PrintUnformatted(resp);
+        if (js) { strncpy(resp_buf, js, sizeof(resp_buf) - 1); free(js); }
+        cJSON_Delete(resp);
+    }
+    ws63_send_json_raw(resp_buf);
+    return ret;
+}
+
+/**
+ * @brief 处理 l610_status — 查询L610模块状态 (协议§13.2.3/§13.3.1)
+ * WS63 → ESP32: {"cmd":"l610_status"}
+ * ESP32 → WS63: {"type":"l610_status","mqtt_state":"connected","signal_quality":18}
+ */
+static esp_err_t ws63_handle_l610_status(void)
+{
+    l610_status_t st;
+    esp_err_t ret = l610_manager_get_status(&st);
+
+    // 按协议§13.3.1生成响应: 仅包含 mqtt_state 和 signal_quality
+    char resp_buf[256];
+    cJSON *resp = cJSON_CreateObject();
+    if (resp) {
+        cJSON_AddStringToObject(resp, "type", "l610_status");
+
+        // mqtt_state
+        const char *mqtt_str = "disconnected";
+        if (st.mqtt_state == MQTT_STATE_CONNECTED)      mqtt_str = "connected";
+        if (st.mqtt_state == MQTT_STATE_CONNECTING)     mqtt_str = "connecting";
+        if (st.mqtt_state == MQTT_STATE_DISCONNECTING)  mqtt_str = "disconnecting";
+        if (st.mqtt_state == MQTT_STATE_RECONNECTING)   mqtt_str = "reconnecting";
+        if (st.mqtt_state == MQTT_STATE_ERROR)          mqtt_str = "error";
+        cJSON_AddStringToObject(resp, "mqtt_state", mqtt_str);
+
+        cJSON_AddNumberToObject(resp, "signal_quality", st.signal_quality);
+
+        char *js = cJSON_PrintUnformatted(resp);
+        if (js) { strncpy(resp_buf, js, sizeof(resp_buf) - 1); free(js); }
+        cJSON_Delete(resp);
+    }
+    ws63_send_json_raw(resp_buf);
+    return ret;
+}
+
+/**
+ * @brief 处理 l610_mqtt_check — 检查MQTT连接健康状态
+ * WS63 → ESP32: {"cmd":"l610_mqtt_check"}
+ * ESP32 → WS63: {"type":"l610_mqtt_check_result","connected":true,"mqtt_state_str":"connected"}
+ */
+static esp_err_t ws63_handle_l610_mqtt_check(void)
+{
+    l610_mqtt_state_t mqtt_state = l610_mqtt_get_state();
+    bool connected = (mqtt_state == MQTT_STATE_CONNECTED);
+    // 注意: l610_manager.c中g_reconnect_attempts是static局部, 无法直接获取
+    // 但manager的心跳会自行处理重连, 这里只返回MQTT连接状态
+
+    char resp_buf[256];
+    cJSON *resp = cJSON_CreateObject();
+    if (resp) {
+        const char *state_str = "disconnected";
+        if (mqtt_state == MQTT_STATE_CONNECTED)      state_str = "connected";
+        if (mqtt_state == MQTT_STATE_CONNECTING)     state_str = "connecting";
+        if (mqtt_state == MQTT_STATE_DISCONNECTING)  state_str = "disconnecting";
+        if (mqtt_state == MQTT_STATE_RECONNECTING)   state_str = "reconnecting";
+        if (mqtt_state == MQTT_STATE_ERROR)          state_str = "error";
+
+        cJSON_AddStringToObject(resp, "type", "l610_mqtt_check_result");
+        cJSON_AddBoolToObject(resp,   "connected",   connected);
+        cJSON_AddStringToObject(resp, "mqtt_state",  state_str);
+        char *js = cJSON_PrintUnformatted(resp);
+        if (js) { strncpy(resp_buf, js, sizeof(resp_buf) - 1); free(js); }
+        cJSON_Delete(resp);
+    }
+    ws63_send_json_raw(resp_buf);
+    return ESP_OK;
+}
+
+/**
+ * @brief 处理 l610_at — AT指令透传调试 (协议§13.2.4)
+ * WS63 → ESP32: {"cmd":"l610_at","at":"AT+CSQ"}
+ * ESP32 → WS63: {"type":"l610_at_result","cmd":"AT+CSQ","result":"ok","response":"+CSQ: 18,99\r\n\r\nOK"}
+ *               或: {"type":"l610_error","code":"L610_AT_TIMEOUT","msg":"L610 not responding"}
+ */
+static esp_err_t ws63_handle_l610_at(cJSON *json_obj)
+{
+    cJSON *at_item = cJSON_GetObjectItem(json_obj, "at");
+    if (!at_item || !cJSON_IsString(at_item)) {
+        char err_buf[256];
+        protocol_generate_error_response(ERR_MISSING_FIELD,
+            "l610_at requires 'at' field",
+            err_buf, sizeof(err_buf));
+        ws63_send_json_raw(err_buf);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const char *at_cmd = at_item->valuestring;
+    if (strlen(at_cmd) == 0) {
+        char err_buf[256];
+        protocol_generate_error_response(ERR_INVALID_FIELD,
+            "'at' field cannot be empty",
+            err_buf, sizeof(err_buf));
+        ws63_send_json_raw(err_buf);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 调用 l610_at_send 发送AT指令并等待响应
+    char response_buf[1024];
+    esp_err_t ret = l610_at_send(at_cmd, response_buf, sizeof(response_buf), L610_AT_DEFAULT_TIMEOUT);
+
+    // 生成响应JSON
+    char resp_buf[1536];  // 足够容纳response
+    cJSON *resp = cJSON_CreateObject();
+    if (resp) {
+        if (ret == ESP_OK) {
+            cJSON_AddStringToObject(resp, "type", "l610_at_result");
+            cJSON_AddStringToObject(resp, "cmd", at_cmd);
+            cJSON_AddStringToObject(resp, "result", "ok");
+
+            // 移除末尾的\r\n以保持JSON整洁
+            size_t rlen = strlen(response_buf);
+            while (rlen > 0 && (response_buf[rlen-1] == '\n' || response_buf[rlen-1] == '\r')) {
+                response_buf[--rlen] = '\0';
+            }
+            cJSON_AddStringToObject(resp, "response", response_buf);
+        } else if (ret == ESP_ERR_TIMEOUT) {
+            cJSON_AddStringToObject(resp, "type", "l610_error");
+            cJSON_AddStringToObject(resp, "code", "L610_AT_TIMEOUT");
+            cJSON_AddStringToObject(resp, "msg", "L610 not responding");
+        } else {
+            cJSON_AddStringToObject(resp, "type", "l610_error");
+            cJSON_AddStringToObject(resp, "code", "L610_AT_TIMEOUT");
+            cJSON_AddStringToObject(resp, "msg", "AT command failed");
+        }
+        char *js = cJSON_PrintUnformatted(resp);
+        if (js) { strncpy(resp_buf, js, sizeof(resp_buf) - 1); free(js); }
+        cJSON_Delete(resp);
+    }
+    ws63_send_json_raw(resp_buf);
+    return ret;
 }

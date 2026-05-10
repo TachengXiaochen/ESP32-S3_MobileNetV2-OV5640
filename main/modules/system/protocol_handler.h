@@ -21,6 +21,15 @@ typedef enum {
     CMD_GET_ASSET,         // 查询单个资产详情
     CMD_SYS_INFO,          // 查询系统信息
     CMD_PING,              // 心跳/状态检测
+
+    // ===== L610 4G 相关命令 (v2.0) =====
+    CMD_MQTT_CONNECT,      // 连接MQTT代理 (协议§13.2.1)
+    CMD_MQTT_DISCONNECT,   // 断开MQTT连接 (协议§13.2.1)
+    CMD_MQTT_PUBLISH,      // 通过4G发布MQTT消息 (协议§13.2.2)
+    CMD_L610_STATUS,       // 查询4G模块状态 (协议§13.2.3)
+    CMD_L610_AT,           // AT指令透传调试 (协议§13.2.4)
+    CMD_L610_MQTT_CHECK,   // 检查4G MQTT连接状态 (内部扩展)
+
     CMD_UNKNOWN            // 未知命令
 } ws63_cmd_t;
 
@@ -183,6 +192,32 @@ const char *protocol_get_cmd_string(ws63_cmd_t cmd);
  * @return 视图字符串
  */
 const char *protocol_get_view_string(capture_view_t view);
+
+// ===== L610 4G 辅助接口 (v2.0) =====
+
+/**
+ * @brief 注册L610发送回调函数 (由4G模块初始化时调用)
+ * 
+ * l610_manager通过此函数向protocol_handler注入"往WS63发数据"的能力,
+ * 避免循环依赖.
+ * 
+ * @param send_func 与protocol_send_response同类型的函数指针
+ */
+void protocol_register_l610_send_cb(void (*send_func)(const char *));
+
+/**
+ * @brief 检查当前是否可以通过4G发布 (即4G模块就绪)
+ * @return true 就绪, false 未就绪
+ */
+bool protocol_is_l610_ready(void);
+
+/**
+ * @brief 获取当前4G/L610模块状态JSON字符串
+ * @param json_buf 输出缓冲区
+ * @param buf_size 缓冲区大小
+ * @return esp_err_t ESP_OK 成功
+ */
+esp_err_t protocol_get_l610_status_json(char *json_buf, size_t buf_size);
 
 #ifdef __cplusplus
 }
