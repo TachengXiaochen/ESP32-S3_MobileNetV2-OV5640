@@ -1,5 +1,5 @@
 #include "camera_module.h"
-#include "mobilenet_wrapper.h"
+#include "../ai/mobilenet_wrapper.h"
 #include "esp_log.h"
 #include "esp_camera.h"
 #include <string.h>  // ✅ 添加string.h以支持memcpy
