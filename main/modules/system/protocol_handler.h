@@ -52,7 +52,18 @@ typedef enum {
     ERR_INTERNAL_ERROR,
     ERR_NOT_INITIALIZED,
     ERR_TASK_BUSY,
-    ERR_INVALID_STATE  // 新增：无效状态错误
+    ERR_INVALID_STATE,      // 无效状态错误
+    // 新增错误码（与文档对齐）
+    ERR_INVALID_ARG,        // 通用参数错误
+    ERR_CAMERA_INIT,        // 摄像头初始化失败
+    ERR_SD_CARD,            // SD卡错误
+    ERR_INSUFFICIENT_SPACE, // 存储空间不足
+    ERR_LOW_CONFIDENCE,     // 置信度过低
+    ERR_TIMEOUT,            // 超时
+    // ⭐ Tag ID 改造新增错误码
+    ERR_INVALID_TAG_ID,     // Tag ID格式无效
+    ERR_VERIFICATION_FAILED, // 验证失败（物品不匹配）
+    ERR_VERIFY_RETRIES_EXCEEDED // 验证重试次数超过上限
 } ws63_error_t;
 
 // ========== 视图类型枚举 ==========
@@ -115,7 +126,7 @@ esp_err_t protocol_generate_error_response(ws63_error_t error_code, const char *
  * @param buf_size 缓冲区大小
  * @return ESP_OK 生成成功，其他为错误码
  */
-esp_err_t protocol_generate_capture_progress(const char *mac, capture_view_t view, 
+esp_err_t protocol_generate_capture_progress(const char *tag_id, capture_view_t view, 
                                             const char *step, const char *status,
                                             float blur_score, char *json_buf, size_t buf_size);
 
@@ -128,7 +139,7 @@ esp_err_t protocol_generate_capture_progress(const char *mac, capture_view_t vie
  * @param buf_size 缓冲区大小
  * @return ESP_OK 生成成功，其他为错误码
  */
-esp_err_t protocol_generate_task_done(ws63_cmd_t task, const char *mac, const char *result,
+esp_err_t protocol_generate_task_done(ws63_cmd_t task, const char *tag_id, const char *result,
                                      char *json_buf, size_t buf_size);
 
 /**

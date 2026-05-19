@@ -24,6 +24,7 @@
 #include "../ai/feature_processor.h"
 #include "../ai/similarity_matcher.h"
 #include "../ai/blur_detection.h"
+#include "tag_id_validator.h"  // Tag ID 验证器
 #include "led_indicator.h"
 #include "../../main.h"
 
@@ -47,13 +48,17 @@ typedef enum {
     WS63_STATE_INITIALIZING,      // 收到register/inventory/outbound，正在初始化硬件
     WS63_STATE_WAITING_CAPTURE,   // 初始化完成，等待capture命令
     WS63_STATE_CAPTURING,         // 正在执行拍摄+推理
-    WS63_STATE_FINALIZING         // 最后一个view完成，正在做最终保存/匹配
+    WS63_STATE_FINALIZING,        // 最后一个view完成，正在做最终保存/匹配
+    // ⭐ Tag ID 验证新增状态
+    WS63_STATE_VERIFYING,         // 验证流程已启动，已发送verification_start消息
+    WS63_STATE_VERIFY_WAITING     // 等待capture命令进行正视图拍摄验证
 } ws63_state_t;
 
 // ========== 全局变量 ==========
 static ws63_state_t g_ws63_state = WS63_STATE_IDLE;
 static ws63_cmd_t g_ws63_current_task = CMD_UNKNOWN;
-static char g_ws63_mac[MAC_ADDR_LEN + 1] = {0};
+static char g_ws63_mac[MAC_ADDR_LEN + 1] = {0};   // 保留用于旧格式兼容
+static char g_ws63_tag_id[TAG_ID_STR_LEN] = {0};   // ⭐ Tag ID (替代 MAC 地址)
 static char g_ws63_item_name[128] = {0};
 static char g_ws63_storage_area = 'A';
 static uint32_t g_ws63_quantity = 0;
@@ -75,6 +80,7 @@ static char g_l610_client_id[64] = {0};
 // ========== 内部函数声明 ==========
 static esp_err_t ws63_uart_init(void);
 static esp_err_t ws63_send_json_raw(const char *json_str);
+static void ws63_send_json_raw_adapter(const char *json_line);  // L610回调适配器
 static esp_err_t ws63_handle_register(cJSON *json_obj);
 static esp_err_t ws63_handle_inventory(cJSON *json_obj);
 static esp_err_t ws63_handle_outbound(cJSON *json_obj);
@@ -119,7 +125,19 @@ static const char* error_strings[] = {
     "SAVE_FAIL",
     "INTERNAL_ERROR",
     "NOT_INITIALIZED",
-    "TASK_BUSY"
+    "TASK_BUSY",
+    "INVALID_STATE",
+    // 新增错误码字符串（与枚举顺序一致）
+    "INVALID_ARG",
+    "CAMERA_INIT",
+    "SD_CARD",
+    "INSUFFICIENT_SPACE",
+    "LOW_CONFIDENCE",
+    "TIMEOUT",
+    // ⭐ Tag ID 改造新增错误码
+    "INVALID_TAG_ID",
+    "VERIFICATION_FAILED",
+    "VERIFY_RETRIES_EXCEEDED"
 };
 
 // ========== 命令字符串映射 ==========
@@ -180,13 +198,24 @@ void protocol_handler_init(void)
     
     // ✅ 注册L610主动上报回调（用于URC事件通知WS63）
     extern void l610_manager_register_send_func(void (*)(const char *));
-    l610_manager_register_send_func(ws63_send_json_raw);
+    l610_manager_register_send_func(ws63_send_json_raw_adapter);
     ESP_LOGI(TAG, "L610 manager send callback registered");
     
     // 创建WS63 UART接收任务
     xTaskCreate(ws63_recv_task, "ws63_recv_task", 4096, NULL, 5, NULL);
     
     ESP_LOGI(TAG, "WS63 protocol handler initialized");
+}
+
+/**
+ * @brief L610回调适配器函数（忽略返回值）
+ * 
+ * 用于将 ws63_send_json_raw 适配为 void 返回类型的函数指针，
+ * 以匹配 l610_manager_register_send_func 的期望签名。
+ */
+static void ws63_send_json_raw_adapter(const char *json_line)
+{
+    ws63_send_json_raw(json_line);  // 忽略返回值
 }
 
 /**
@@ -223,7 +252,6 @@ esp_err_t protocol_handle_command(const char *json_str)
     
     esp_err_t ret = ESP_OK;
     
-    // 根据命令类型处理
     switch (cmd) {
         case CMD_REGISTER:
             ret = ws63_handle_register(json_obj);
@@ -661,7 +689,7 @@ static esp_err_t ws63_send_json_raw(const char *json_str)
     }
     
     size_t len = strlen(json_str);
-    char *msg_with_newline = malloc(len + 2); // +1 for newline, +1 for null terminator
+    char *msg_with_newline = malloc(len + 2);
     if (msg_with_newline == NULL) {
         return ESP_ERR_NO_MEM;
     }
@@ -679,6 +707,10 @@ static esp_err_t ws63_send_json_raw(const char *json_str)
     ESP_LOGD(TAG, "Sent to WS63: %s", json_str);
     return ESP_OK;
 }
+
+/**
+ * @brief 处理接收到的JSON命令
+ */
 
 /**
  * @brief 验证MAC地址格式
@@ -740,7 +772,7 @@ static ws63_cmd_t ws63_parse_cmd(const char *cmd_str)
 }
 
 /**
- * @brief 获取当前状态字符串
+ * @brief 获取状态字符串
  */
 static const char* ws63_get_state_string(void)
 {
@@ -750,6 +782,8 @@ static const char* ws63_get_state_string(void)
         case WS63_STATE_WAITING_CAPTURE: return "waiting_capture";
         case WS63_STATE_CAPTURING: return "capturing";
         case WS63_STATE_FINALIZING: return "finalizing";
+        case WS63_STATE_VERIFYING: return "verifying";
+        case WS63_STATE_VERIFY_WAITING: return "verify_waiting";
         default: return "unknown";
     }
 }
@@ -768,77 +802,183 @@ static esp_err_t ws63_handle_register(cJSON *json_obj)
         return ESP_ERR_INVALID_STATE;
     }
     
+    // ⭐ 为验证式更新分支准备 - 先检查 item_name 和 quantity 是否为可选（验证模式）
+    // 验证模式：仅需 tag_id + quantity，item_name 和 storage_area 可选（用于累加）
+    bool is_verify_mode = false;  // 是否走验证式更新分支
+    
+    // 检查是否只有 quantity 没有 item_name（验证式更新模式）
+    cJSON *quantity_only_item = cJSON_GetObjectItem(json_obj, "quantity");
+    cJSON *name_check = cJSON_GetObjectItem(json_obj, "item_name");
+    // 如果提供了 quantity 但没有 item_name，说明是验证式更新（仅累加数量）
+    if (quantity_only_item && cJSON_IsNumber(quantity_only_item) && 
+        (name_check == NULL || !cJSON_IsString(name_check))) {
+        is_verify_mode = true;
+        ESP_LOGI(TAG, "Detected verification mode (quantity-only register)");
+    }
+    
+    // ⭐ 解析 tag_id 字段（兼容旧 mac 字段）
+    const char *tag_id = NULL;
+    cJSON *tag_id_item = cJSON_GetObjectItem(json_obj, "tag_id");
+    if (tag_id_item && cJSON_IsString(tag_id_item)) {
+        tag_id = tag_id_item->valuestring;
+        char temp_tag[TAG_ID_STR_LEN];
+        strncpy(temp_tag, tag_id, TAG_ID_STR_LEN - 1);
+        temp_tag[TAG_ID_STR_LEN - 1] = '\0';
+        tag_id_validator_normalize(temp_tag);
+        strncpy(g_ws63_tag_id, temp_tag, TAG_ID_STR_LEN - 1);
+        g_ws63_tag_id[TAG_ID_STR_LEN - 1] = '\0';
+        if (!tag_id_validator_validate(g_ws63_tag_id)) {
+            char error_buf[256];
+            protocol_generate_error_response(ERR_INVALID_TAG_ID, 
+                tag_id_validator_get_error_string(),
+                error_buf, sizeof(error_buf));
+            ws63_send_json_raw(error_buf);
+            return ESP_ERR_INVALID_ARG;
+        }
+        snprintf(g_ws63_mac, sizeof(g_ws63_mac), "%s", g_ws63_tag_id);
+    } else {
+        cJSON *mac_item_fallback = cJSON_GetObjectItem(json_obj, "mac");
+        if (!mac_item_fallback || !cJSON_IsString(mac_item_fallback)) {
+            char error_buf[256];
+            protocol_generate_error_response(ERR_MISSING_FIELD, 
+                "Missing 'tag_id' or 'mac' field", 
+                error_buf, sizeof(error_buf));
+            ws63_send_json_raw(error_buf);
+            return ESP_ERR_INVALID_ARG;
+        }
+        tag_id = mac_item_fallback->valuestring;
+        if (ws63_validate_mac(tag_id) != ESP_OK) {
+            char error_buf[256];
+            protocol_generate_error_response(ERR_INVALID_MAC, "Invalid MAC format", 
+                                            error_buf, sizeof(error_buf));
+            ws63_send_json_raw(error_buf);
+            return ESP_ERR_INVALID_ARG;
+        }
+        strncpy(g_ws63_mac, tag_id, sizeof(g_ws63_mac) - 1);
+        g_ws63_mac[sizeof(g_ws63_mac) - 1] = '\0';
+    }
+    
+    // ⭐ 如果走验证式更新模式，检查资产是否存在
+    if (is_verify_mode) {
+        asset_record_t existing;
+        esp_err_t asset_ret = asset_load(g_ws63_tag_id[0] ? g_ws63_tag_id : g_ws63_mac, &existing);
+        
+        if (asset_ret == ESP_OK && existing.is_valid) {
+            // ⭐ 资产存在→进入验证式更新流程
+            int qty = quantity_only_item->valueint;
+            if (qty <= 0) {
+                char error_buf[256];
+                protocol_generate_error_response(ERR_INVALID_FIELD, "Quantity must be positive",
+                                                error_buf, sizeof(error_buf));
+                ws63_send_json_raw(error_buf);
+                return ESP_ERR_INVALID_ARG;
+            }
+            g_ws63_quantity = qty;
+            g_ws63_current_task = CMD_REGISTER;
+            
+            // 发送验证开始消息
+            char verify_buf[512];
+            cJSON *vmsg = cJSON_CreateObject();
+            if (vmsg) {
+                cJSON_AddStringToObject(vmsg, "type", "verification_start");
+                cJSON_AddStringToObject(vmsg, "tag_id", g_ws63_tag_id);
+                cJSON_AddStringToObject(vmsg, "existing_item", existing.item_name);
+                cJSON_AddNumberToObject(vmsg, "current_qty", existing.quantity);
+                cJSON_AddStringToObject(vmsg, "required_view", "front");
+                cJSON_AddStringToObject(vmsg, "message", "Please capture FRONT view for verification");
+                char *js = cJSON_PrintUnformatted(vmsg);
+                if (js) {
+                    strncpy(verify_buf, js, sizeof(verify_buf) - 1);
+                    free(js);
+                }
+                cJSON_Delete(vmsg);
+            }
+            ws63_send_json_raw(verify_buf);
+            
+            // ⭐ 保存验证所需信息
+            strncpy(g_ws63_item_name, existing.item_name, sizeof(g_ws63_item_name) - 1);
+            g_ws63_storage_area = existing.storage_area;
+            // 保存参考特征用于后续验证
+            memcpy(g_ws63_front_feature, existing.front_feature, sizeof(g_ws63_front_feature));
+            
+            // 进入验证状态
+            g_ws63_state = WS63_STATE_VERIFYING;
+            g_ws63_total_views = 1;  // 验证只需1个正视图
+            
+            // 初始化AI和摄像头
+            if (!ai_module_init() || !camera_module_init()) {
+                char error_buf[256];
+                protocol_generate_error_response(ERR_CAMERA_FAIL, "Hardware init failed",
+                                                error_buf, sizeof(error_buf));
+                ws63_send_json_raw(error_buf);
+                ws63_reset_state();
+                return ESP_FAIL;
+            }
+            
+            ESP_LOGI(TAG, "Verification flow started for tag_id=%s, existing=%s, qty=%d",
+                     g_ws63_tag_id, existing.item_name, qty);
+            return ESP_OK;
+        }
+        // 资产不存在则回退到完整注册
+        ESP_LOGW(TAG, "Asset not found for verification mode, falling back to full registration");
+    }
+    
+    // ===== 完整注册流程（新资产或回退）=====
     // 验证必填字段
-    cJSON *mac_item = cJSON_GetObjectItem(json_obj, "mac");
     cJSON *item_name_item = cJSON_GetObjectItem(json_obj, "item_name");
     cJSON *storage_area_item = cJSON_GetObjectItem(json_obj, "storage_area");
     cJSON *quantity_item = cJSON_GetObjectItem(json_obj, "quantity");
     
-    if (!mac_item || !cJSON_IsString(mac_item) ||
-        !item_name_item || !cJSON_IsString(item_name_item) ||
+    if (!item_name_item || !cJSON_IsString(item_name_item) ||
         !storage_area_item || !cJSON_IsString(storage_area_item) ||
         !quantity_item || !cJSON_IsNumber(quantity_item)) {
         char error_buf[256];
-        protocol_generate_error_response(ERR_MISSING_FIELD, "Missing required fields", 
+        protocol_generate_error_response(ERR_MISSING_FIELD, "Missing required fields for registration", 
                                         error_buf, sizeof(error_buf));
         ws63_send_json_raw(error_buf);
+        ws63_reset_state();
         return ESP_ERR_INVALID_ARG;
     }
     
-    // 验证MAC地址格式
-    const char *mac = mac_item->valuestring;
-    if (ws63_validate_mac(mac) != ESP_OK) {
-        char error_buf[256];
-        protocol_generate_error_response(ERR_INVALID_MAC, "Invalid MAC address format", 
-                                        error_buf, sizeof(error_buf));
-        ws63_send_json_raw(error_buf);
-        return ESP_ERR_INVALID_ARG;
-    }
-    
-    // 验证物品名称长度
     const char *item_name = item_name_item->valuestring;
+    const char *storage_area_str = storage_area_item->valuestring;
+    int quantity = quantity_item->valueint;
+    
     if (strlen(item_name) == 0 || strlen(item_name) >= 128) {
         char error_buf[256];
-        protocol_generate_error_response(ERR_INVALID_FIELD, "Item name must be 1-127 characters", 
+        protocol_generate_error_response(ERR_INVALID_FIELD, "Item name must be 1-127 chars", 
                                         error_buf, sizeof(error_buf));
         ws63_send_json_raw(error_buf);
+        ws63_reset_state();
         return ESP_ERR_INVALID_ARG;
     }
-    
-    // 验证存放区域
-    const char *storage_area_str = storage_area_item->valuestring;
     if (strlen(storage_area_str) != 1 || !isalpha((unsigned char)storage_area_str[0])) {
         char error_buf[256];
-        protocol_generate_error_response(ERR_INVALID_FIELD, "Storage area must be a single letter A-Z", 
+        protocol_generate_error_response(ERR_INVALID_FIELD, "Storage area must be A-Z", 
                                         error_buf, sizeof(error_buf));
         ws63_send_json_raw(error_buf);
+        ws63_reset_state();
         return ESP_ERR_INVALID_ARG;
     }
-    
-    // 验证数量
-    int quantity = quantity_item->valueint;
     if (quantity <= 0) {
         char error_buf[256];
         protocol_generate_error_response(ERR_INVALID_FIELD, "Quantity must be positive", 
                                         error_buf, sizeof(error_buf));
         ws63_send_json_raw(error_buf);
+        ws63_reset_state();
         return ESP_ERR_INVALID_ARG;
     }
     
-    // 保存参数到全局变量
-    strncpy(g_ws63_mac, mac, sizeof(g_ws63_mac) - 1);
-    g_ws63_mac[sizeof(g_ws63_mac) - 1] = '\0';  // ✅ 确保字符串终止
     strncpy(g_ws63_item_name, item_name, sizeof(g_ws63_item_name) - 1);
     g_ws63_item_name[sizeof(g_ws63_item_name) - 1] = '\0';
     g_ws63_storage_area = toupper((unsigned char)storage_area_str[0]);
     g_ws63_quantity = quantity;
     
-    // ✅ 动态生成L610 ClientID（格式：WS63-{MAC}）
     snprintf(g_l610_client_id, sizeof(g_l610_client_id), "WS63-%s", g_ws63_mac);
     ESP_LOGI(TAG, "L610 ClientID generated: %s", g_l610_client_id);
     
     g_ws63_current_task = CMD_REGISTER;
-    g_ws63_total_views = 3;  // 注册需要3个视图
+    g_ws63_total_views = 3;
     g_ws63_captured_views = 0;
     // 初始化AI模块
     if (!ai_module_init()) {
@@ -1560,7 +1700,7 @@ static esp_err_t ws63_finalize_task(void)
             asset_record_t record;
             memset(&record, 0, sizeof(record));
             
-            strncpy(record.mac_address, g_ws63_mac, sizeof(record.mac_address) - 1);
+            strncpy(record.tag_id, g_ws63_tag_id, sizeof(record.tag_id) - 1);
             strncpy(record.item_name, g_ws63_item_name, sizeof(record.item_name) - 1);
             record.storage_area = g_ws63_storage_area;
             record.quantity = g_ws63_quantity;

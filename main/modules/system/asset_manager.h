@@ -10,11 +10,21 @@ extern "C" {
 #endif
 
 // 资产记录结构
-#define MAC_ADDR_LEN 17
+// ⚠️ MAC_ADDR_LEN 保留为17用于向后兼容（旧数据迁移）
+#define MAC_ADDR_LEN 17         // 保留，用于旧格式兼容
+#define TAG_ID_LEN 6            // "0xFFFF" = 6字符
+#define TAG_ID_STR_LEN 7        // 含终止符
 #define FEATURE_VEC_SIZE 1280
 
+/**
+ * @brief 资产记录结构
+ * 
+ * tag_id 替代了原有的 mac_address。
+ * tag_id 格式：0x0001 - 0xFFFF（6字符，不含终止符7字符）
+ * 旧数据的 mac_address 字段仍可被读取（向后兼容）
+ */
 typedef struct {
-    char mac_address[MAC_ADDR_LEN + 1];  // MAC地址字符串
+    char tag_id[TAG_ID_STR_LEN];           // Tag ID (如 "0x0001") ⭐替代MAC地址
     char item_name[128];                 // 物品名称
     char storage_area;                   // 存放区域（A-Z）
     uint32_t quantity;                   // 物品数量
@@ -22,6 +32,8 @@ typedef struct {
     float side_feature[FEATURE_VEC_SIZE];  // 侧面特征向量
     float top_feature[FEATURE_VEC_SIZE];   // 顶部特征向量
     bool is_valid;                          // 记录是否有效
+    // 旧格式兼容字段（仅在加载旧数据时填充）
+    char _legacy_mac[MAC_ADDR_LEN + 1];     // ⚠️ 旧MAC地址，仅用于迁移
 } asset_record_t;
 
 // 存储模式枚举
@@ -52,7 +64,7 @@ esp_err_t asset_save(const asset_record_t *record, bool *is_overwrite);
  * @param jpeg_len JPEG数据长度
  * @return ESP_OK表示成功
  */
-esp_err_t asset_save_image(const char *mac_address, const char *view_name, 
+esp_err_t asset_save_image(const char *tag_id, const char *view_name, 
                            const uint8_t *jpeg_data, size_t jpeg_len);
 
 /**
@@ -61,14 +73,14 @@ esp_err_t asset_save_image(const char *mac_address, const char *view_name,
  * @param record 输出参数，资产记录
  * @return ESP_OK表示成功，ESP_ERR_NOT_FOUND表示未找到
  */
-esp_err_t asset_load(const char *mac_address, asset_record_t *record);
+esp_err_t asset_load(const char *tag_id, asset_record_t *record);
 
 /**
  * @brief 删除资产记录
  * @param mac_address MAC地址
  * @return ESP_OK表示成功
  */
-esp_err_t asset_delete(const char *mac_address);
+esp_err_t asset_delete(const char *tag_id);
 
 /**
  * @brief 列出所有已注册的资产

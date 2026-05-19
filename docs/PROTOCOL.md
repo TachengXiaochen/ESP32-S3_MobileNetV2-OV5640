@@ -1,9 +1,10 @@
 # WS63 ↔ ESP32-S3 通信协议规范
 
-> **文档版本**: v3.1  
-> **最后更新**: 2026-05-10  
+> **文档版本**: v3.2  
+> **最后更新**: 2026-05-19  
 > **适用项目**: CAM_AI (ESP32-S3 视觉感知物资管理子节点)  
 > **主要更新**: 
+> - **v3.2**: Tag ID 改造（标识符从MAC地址升级为16位Tag ID，新增验证式更新流程）⭐
 > - v3.1: L610 4G模块完整集成（MQTT云端通信、主动上报机制）
 > - v3.0: WS63协议支持（JSON格式UART通信）
 > - v2.x: 基础资产管理系统功能
@@ -146,17 +147,31 @@
 
 ## 6. 下行命令 WS63 → ESP32
 
-### 6.1 register - 资产注册
+### 6.1 register - 资产注册 ⭐ v3.2
+
+**Tag ID 格式规范**：
+| 规则 | 值 |
+|------|-----|
+| 长度 | 6字符（不含终止符），7字符（含终止符） |
+| 格式 | `0x` + 4位十六进制 |
+| 范围 | `0x0001` - `0xFFFF`（65000+唯一标识） |
+| 大小写 | 不敏感，存储时统一转为大写 |
+| 文件命名 | 直接使用 `0x0001.dat`（无需转义） |
+
+**验证规则**：
+- ✅ 合法：`0x0001`, `0x00AB`, `0xABCD`, `0xffff`
+- ❌ 非法：`0x0000`（最小值以下）, `0x10000`（超范围）, `0xGGGG`（非hex）
+
+#### 模式A：完整注册（新资产）
 
 **命令格式**：
 ```json
 {
   "cmd": "register",
-  "mac": "AA:BB:CC:DD:EE:FF",
+  "tag_id": "0x0001",
   "item_name": "扳手",
   "storage_area": "A",
-  "quantity": 50,
-  "is_overwrite": false
+  "quantity": 50
 }
 ```
 
@@ -164,34 +179,135 @@
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | cmd | string | ✅ | 固定值"register" |
-| mac | string | ✅ | MAC地址（格式：XX:XX:XX:XX:XX:XX） |
-| item_name | string | ✅ | 物品名称 |
-| storage_area | string | ✅ | 存放区域 |
-| quantity | number | ✅ | 数量 |
-| is_overwrite | boolean | ❌ | 是否覆盖已有资产（默认false） |
+| tag_id | string | ✅* | Tag ID（格式：0x0001-0xFFFF）⭐替代mac |
+| mac | string | ❌* | 旧MAC地址格式（向后兼容，与tag_id二选一） |
+| item_name | string | ✅ | 物品名称（验证模式时可选） |
+| storage_area | string | ✅ | 存放区域（验证模式时可选） |
+| quantity | number | ✅ | 数量（首次注册）或累加数量（验证模式） |
 
-**响应**：
+> *`tag_id`和`mac`二选一，推荐使用`tag_id`
+
+**完整注册响应**：
 ```json
-// 成功
-{"type":"task_done","task":"register","result":"success","mac":"AA:BB:CC:DD:EE:FF",...}
+{
+  "type": "task_done",
+  "task": "register",
+  "result": "success",
+  "tag_id": "0x0001",
+  "item_name": "扳手",
+  "storage_area": "A",
+  "quantity": 50,
+  "is_overwrite": false,
+  "file_size_kb": 45
+}
+```
 
-// 失败
-{"type":"error","code":"ERR_ASSET_EXISTS","msg":"Asset already exists"}
+#### 模式B：验证式更新（已有资产累加）⭐NEW
+
+**触发条件**：当 `tag_id` 已存在的资产记录，且命令中**不包含** `item_name` 字段
+
+**命令格式**（仅需 tag_id + quantity）：
+```json
+{
+  "cmd": "register",
+  "tag_id": "0x0001",
+  "quantity": 20
+}
+```
+
+**执行流程**：
+```
+WS63 → ESP32: {"cmd":"register","tag_id":"0x0001","quantity":20}
+ESP32: 检查资产 0x0001 → 已存在（扳手，50件）
+ESP32 → WS63: {"type":"verification_start","tag_id":"0x0001",
+                "existing_item":"扳手","current_qty":50,
+                "required_view":"front","message":"请拍摄正视图验证"}
+WS63 → ESP32: {"cmd":"capture","view":"front"}
+ESP32: 拍摄正视图 → 提取特征 → 计算相似度
+├─ 相似度≥0.75 ✅ → 累加数量: 50+20=70
+│  ESP32 → WS63: {"type":"task_done","task":"register","result":"success_updated",
+│                  "tag_id":"0x0001","item_name":"扳手",
+│                  "previous_qty":50,"added_qty":20,"new_qty":70,
+│                  "verification":{"confidence":0.92,"threshold":0.75,"passed":true}}
+└─ 相似度<0.75 ❌ → 拒绝更新
+   ESP32 → WS63: {"type":"error","code":"ERR_VERIFICATION_FAILED",
+                   "msg":"Item mismatch! Similarity: 0.45 < threshold 0.75",
+                   "details":{"tag_id":"0x0001","existing_item":"扳手",
+                              "captured_similarity":0.45,"threshold":0.75}}
+```
+
+**验证开始消息**：
+```json
+{
+  "type": "verification_start",
+  "tag_id": "0x0001",
+  "existing_item": "扳手",
+  "current_qty": 50,
+  "required_view": "front",
+  "message": "Please capture FRONT view for verification"
+}
+```
+
+**验证成功响应**：
+```json
+{
+  "type": "task_done",
+  "task": "register",
+  "result": "success_updated",
+  "tag_id": "0x0001",
+  "item_name": "扳手",
+  "storage_area": "A",
+  "previous_qty": 50,
+  "added_qty": 20,
+  "new_qty": 70,
+  "verification": {
+    "confidence": 0.92,
+    "threshold": 0.75,
+    "passed": true
+  }
+}
+```
+
+**验证失败响应**：
+```json
+{
+  "type": "error",
+  "code": "ERR_VERIFICATION_FAILED",
+  "msg": "Item mismatch! Similarity: 0.45 < threshold 0.75",
+  "details": {
+    "tag_id": "0x0001",
+    "existing_item": "扳手",
+    "captured_similarity": 0.45,
+    "threshold": 0.75,
+    "suggestion": "Please check if correct item is placed"
+  }
+}
 ```
 
 ---
 
-### 6.2 inventory - 资产盘点
+### 6.2 inventory - 资产盘点 ⭐ v3.2
+
+**Tag ID格式**：`0x0001-0xFFFF`
 
 **命令格式**：
 ```json
 {
   "cmd": "inventory",
-  "item_name": "扳手",
-  "storage_area": "A",
+  "tag_id": "0x0001",
   "expected_qty": 50
 }
 ```
+
+**字段说明**：
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| cmd | string | ✅ | 固定值"inventory" |
+| tag_id | string | ✅* | Tag ID（格式：0x0001-0xFFFF）⭐替代mac |
+| mac | string | ❌* | 旧MAC地址格式（向后兼容，与tag_id二选一） |
+| expected_qty | number | ❌ | 预期数量（可选，用于比对） |
+
+> *`tag_id`和`mac`二选一，推荐使用`tag_id`
 
 **执行流程**：
 1. ESP32引导拍摄三视图（正面、侧面、顶部）
@@ -207,7 +323,7 @@
   "task": "inventory",
   "result": "success",
   "matched_asset": {
-    "mac": "AA:BB:CC:DD:EE:FF",
+    "tag_id": "0x0001",
     "item_name": "扳手",
     "confidence": 0.92,
     "blur_scores": [87.3, 91.2, 84.6]
@@ -217,18 +333,44 @@
 
 ---
 
-### 6.3 outbound - 出库操作
+### 6.3 outbound - 出库操作 ⭐ v3.2
+
+**Tag ID格式**：`0x0001-0xFFFF`
 
 **命令格式**：
 ```json
 {
   "cmd": "outbound",
-  "mac": "AA:BB:CC:DD:EE:FF",
+  "tag_id": "0x0001",
   "remove_qty": 5
 }
 ```
 
+**字段说明**：
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| cmd | string | ✅ | 固定值"outbound" |
+| tag_id | string | ✅* | Tag ID（格式：0x0001-0xFFFF）⭐替代mac |
+| mac | string | ❌* | 旧MAC地址格式（向后兼容，与tag_id二选一） |
+| remove_qty | number | ✅ | 出库数量 |
+
+> *`tag_id`和`mac`二选一，推荐使用`tag_id`
+
 **特点**：仅拍摄正视图，快速比对
+
+**响应示例**：
+```
+{
+  "type": "task_done",
+  "task": "outbound",
+  "result": "success",
+  "tag_id": "0x0001",
+  "item_name": "扳手",
+  "previous_qty": 50,
+  "removed_qty": 5,
+  "new_qty": 45
+}
+```
 
 ---
 
@@ -248,7 +390,7 @@
 ```json
 {
   "type": "capture_progress",
-  "mac": "AA:BB:CC:DD:EE:FF",
+  "tag_id": "0x0001",
   "view": "front",
   "step": "1/3",
   "status": "ok",
@@ -259,7 +401,7 @@
 
 ---
 
-### 6.5 get_assets - 查询资产列表
+### 6.5 get_assets - 查询资产列表 ⭐ v3.2
 
 **命令格式**：
 ```json
@@ -272,8 +414,9 @@
   "type": "asset_list",
   "count": 3,
   "assets": [
-    {"mac":"AA:BB:CC:DD:EE:FF","item_name":"扳手","storage_area":"A","quantity":50},
-    ...
+    {"tag_id":"0x0001","item_name":"扳手","storage_area":"A","quantity":50},
+    {"tag_id":"0x0002","item_name":"螺丝刀","storage_area":"B","quantity":30},
+    {"tag_id":"0x00AB","item_name":"钳子","storage_area":"A","quantity":20}
   ]
 }
 ```
@@ -295,7 +438,8 @@
   "sd_total_mb": 7580,
   "sd_used_mb": 1250,
   "sd_free_mb": 6330,
-  "firmware_version": "v3.1"
+  "firmware_version": "v3.2",
+  "state": "idle"
 }
 ```
 
@@ -303,7 +447,7 @@
 
 ## 7. 上行消息 ESP32 → WS63
 
-### 7.1 task_done - 任务完成
+### 7.1 task_done - 任务完成 ⭐ v3.2
 
 **触发时机**：register/inventory/outbound任务完成
 
@@ -313,7 +457,7 @@
   "type": "task_done",
   "task": "register",
   "result": "success",
-  "mac": "AA:BB:CC:DD:EE:FF",
+  "tag_id": "0x0001",
   "item_name": "扳手",
   "storage_area": "A",
   "quantity": 50,
@@ -322,9 +466,42 @@
 }
 ```
 
+**字段说明**：
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| type | string | 固定值"task_done" |
+| task | string | 任务类型："register"/"inventory"/"outbound" |
+| result | string | 结果："success"/"success_updated"/"failed" |
+| tag_id | string | ⭐资产Tag ID（格式：0x0001-0xFFFF） |
+| item_name | string | 物品名称 |
+| storage_area | string | 存放区域 |
+| quantity | number | 数量（注册/盘点）或新数量（出库） |
+| is_overwrite | boolean | 是否覆盖已有资产 |
+| file_size_kb | number | 资产文件大小（KB） |
+
+**验证式更新响应**（result="success_updated"）：
+```json
+{
+  "type": "task_done",
+  "task": "register",
+  "result": "success_updated",
+  "tag_id": "0x0001",
+  "item_name": "扳手",
+  "storage_area": "A",
+  "previous_qty": 50,
+  "added_qty": 20,
+  "new_qty": 70,
+  "verification": {
+    "confidence": 0.92,
+    "threshold": 0.75,
+    "passed": true
+  }
+}
+```
+
 ---
 
-### 7.2 capture_progress - 拍摄进度
+### 7.2 capture_progress - 拍摄进度 ⭐ v3.2
 
 **触发时机**：每次视图拍摄完成
 
@@ -332,7 +509,7 @@
 ```json
 {
   "type": "capture_progress",
-  "mac": "AA:BB:CC:DD:EE:FF",
+  "tag_id": "0x0001",
   "view": "front",
   "step": "1/3",
   "status": "ok",
@@ -341,6 +518,17 @@
 }
 ```
 
+**字段说明**：
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| type | string | 固定值"capture_progress" |
+| tag_id | string | ⭐当前任务的Tag ID |
+| view | string | 视图类型："front"/"side"/"top" |
+| step | string | 进度："1/3"、"2/3"、"3/3" |
+| status | string | 状态："ok"/"retry"/"failed" |
+| blur_score | number | 模糊度评分（0-100，越高越清晰） |
+| feature_size | number | 特征向量维度（1280） |
+
 ---
 
 ### 7.3 error - 错误消息
@@ -348,11 +536,11 @@
 **触发时机**：任何命令执行失败
 
 **消息格式**：
-```json
+```
 {
   "type": "error",
   "code": "ERR_INVALID_ARG",
-  "msg": "Invalid argument: mac field missing"
+  "msg": "Invalid argument: tag_id field missing"
 }
 ```
 
@@ -392,16 +580,39 @@ WS63                          ESP32
 
 | 错误码 | 说明 | 解决方案 |
 |--------|------|----------|
-| `ERR_INVALID_ARG` | 参数错误 | 检查JSON字段是否完整 |
-| `ERR_MISSING_FIELD` | 缺少必填字段 | 补充缺失字段 |
-| `ERR_ASSET_EXISTS` | 资产已存在 | 设置is_overwrite=true |
-| `ERR_ASSET_NOT_FOUND` | 资产不存在 | 检查MAC地址 |
-| `ERR_CAMERA_INIT` | 摄像头初始化失败 | 检查硬件连接 |
-| `ERR_SD_CARD` | SD卡错误 | 检查SD卡状态 |
-| `ERR_INSUFFICIENT_SPACE` | 存储空间不足 | 清理SD卡 |
-| `ERR_BLUR_DETECTED` | 图像模糊 | 重新拍摄 |
-| `ERR_LOW_CONFIDENCE` | 置信度过低 | 检查环境光线 |
-| `ERR_TIMEOUT` | 超时 | 检查模块状态 |
+| `ERR_INVALID_JSON` | JSON解析失败 | 检查JSON格式是否正确 |
+| `ERR_UNKNOWN_CMD` | 未知命令 | 检查cmd字段值 |
+| `ERR_MISSING_FIELD` | 缺少必填字段 | 补充缺失字段（如tag_id） |
+| `ERR_INVALID_MAC` | ⚠️MAC地址格式错误（已弃用） | 请使用tag_id字段（0x0001-0xFFFF） |
+| `ERR_INVALID_TAG_ID` | ⭐Tag ID格式无效 | 使用0x0001-0xFFFF格式 |
+| `ERR_INVALID_FIELD` | 字段值无效 | 检查字段取值范围 |
+| `ERR_ASSET_NOT_FOUND` | 资产不存在 | 检查Tag ID是否正确 |
+| `ERR_ASSET_ALREADY_EXISTS` | 资产已存在 | 设置is_overwrite=true或使用验证式更新 |
+| `ERR_STORAGE_NOT_READY` | 存储未就绪 | 检查SD卡状态 |
+| `ERR_CAMERA_FAIL` | 摄像头初始化失败 | 检查硬件连接和供电 |
+| `ERR_AI_MODEL_FAIL` | AI模型初始化失败 | 检查esp-dl组件 |
+| `ERR_CAPTURE_FAIL` | 拍摄失败 | 检查摄像头状态 |
+| `ERR_BLUR_DETECTED` | 图像模糊 | 调整光线或重新拍摄 |
+| `ERR_INFERENCE_FAIL` | 推理失败 | 检查AI模块状态 |
+| `ERR_SAVE_FAIL` | 保存失败 | 检查存储空间 |
+| `ERR_INTERNAL_ERROR` | 内部错误 | 查看日志排查原因 |
+| `ERR_NOT_INITIALIZED` | 未初始化 | 先执行初始化命令 |
+| `ERR_TASK_BUSY` | 其他任务进行中 | 等待当前任务完成 |
+| `ERR_INVALID_STATE` | 无效状态 | 检查状态机流转 |
+| `ERR_INVALID_ARG` | 通用参数错误 | 检查参数类型和范围 |
+| `ERR_CAMERA_INIT` | 摄像头初始化失败 | 检查硬件连接（同ERR_CAMERA_FAIL） |
+| `ERR_SD_CARD` | SD卡错误 | 检查SD卡格式和状态 |
+| `ERR_INSUFFICIENT_SPACE` | 存储空间不足 | 清理SD卡或更换大容量卡 |
+| `ERR_LOW_CONFIDENCE` | 置信度过低 | 改善光照条件或重新拍摄 |
+| `ERR_TIMEOUT` | 超时 | 检查模块响应和网络状态 |
+| `ERR_VERIFICATION_FAILED` | ⭐验证失败（物品不匹配） | 确认物品是否正确放置 |
+| `ERR_VERIFY_RETRIES_EXCEEDED` | ⭐验证重试超限 | 联系管理员人工处理 |
+
+**注意**：
+- ⚠️ `ERR_INVALID_MAC` 已标记为弃用，推荐使用 `ERR_INVALID_TAG_ID`
+- ✅ v3.2版本新增 `ERR_INVALID_TAG_ID`、`ERR_VERIFICATION_FAILED`、`ERR_VERIFY_RETRIES_EXCEEDED`
+- `ERR_CAMERA_INIT` 与 `ERR_CAMERA_FAIL` 功能相同，建议统一使用 `ERR_CAMERA_FAIL`
+- 所有错误码均已在代码中实现（见 [protocol_handler.h](../main/modules/system/protocol_handler.h)）
 
 ---
 
@@ -521,7 +732,7 @@ IDLE ──[register/inventory]──► INITIALIZING
 6. 向WS63上报连接结果
 
 **响应示例**：
-```json
+```
 // 成功
 {
   "type": "mqtt_connected",
@@ -575,7 +786,7 @@ IDLE ──[register/inventory]──► INITIALIZING
 5. 向WS63上报发布结果
 
 **响应示例**：
-```json
+```
 // 成功
 {
   "type": "mqtt_publish_result",
@@ -601,7 +812,7 @@ IDLE ──[register/inventory]──► INITIALIZING
 ```
 
 **响应示例**：
-```json
+```
 {
   "type": "mqtt_connected",
   "state": "disconnected",
@@ -620,7 +831,7 @@ IDLE ──[register/inventory]──► INITIALIZING
 ```
 
 **常用AT指令**：
-```bash
+``bash
 AT              # 测试通信
 AT+CSQ          # 信号质量（返回：+CSQ: 25,99）
 AT+CGATT?       # 网络附着状态（返回：+CGATT: 1）
@@ -629,7 +840,7 @@ AT+MQTTLOG=1    # 开启MQTT详细日志
 ```
 
 **响应示例**：
-```json
+```
 // 成功
 {
   "type": "l610_at_result",
@@ -656,7 +867,7 @@ AT+MQTTLOG=1    # 开启MQTT详细日志
 ```
 
 **响应示例**：
-```json
+```
 {
   "type": "l610_status",
   "l610_state": "READY",
@@ -744,7 +955,48 @@ AT+MQTTLOG=1    # 开启MQTT详细日志
 
 ---
 
-### 14.4 l610_at_result - AT指令结果
+### 14.4 mqtt_publish_result - MQTT发布结果 ⭐NEW v3.1
+
+**消息格式**：
+```json
+{
+  "type": "mqtt_publish_result",
+  "result": "ok",
+  "topic": "device/status"
+}
+```
+
+**字段说明**：
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| type | string | 固定值 `"mqtt_publish_result"` |
+| result | string | 结果：`"ok"` / `"failed"` |
+| topic | string | 发布的MQTT主题 |
+
+**触发时机**：
+- `mqtt_publish`命令执行完成后
+- 收到L610的+MQTTPUB URC事件后
+
+**示例**：
+```json
+// 成功
+{
+  "type": "mqtt_publish_result",
+  "result": "ok",
+  "topic": "device/status"
+}
+
+// 失败
+{
+  "type": "error",
+  "code": "ERR_INVALID_SIZE",
+  "msg": "Payload too long: 1025 bytes (max 1024)"
+}
+```
+
+---
+
+### 14.5 l610_at_result - AT指令结果 ⭐NEW v3.1
 
 **消息格式**：
 ```json
@@ -753,6 +1005,124 @@ AT+MQTTLOG=1    # 开启MQTT详细日志
   "cmd": "AT+CSQ",
   "result": "ok",
   "response": "+CSQ: 25,99\r\nOK"
+}
+```
+
+**字段说明**：
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| type | string | 固定值 `"l610_at_result"` |
+| cmd | string | 执行的AT指令 |
+| result | string | 结果：`"ok"` / `"timeout"` / `"error"` |
+| response | string | L610返回的原始响应（包含`\r\n`） |
+
+**触发时机**：
+- `l610_at`命令执行完成后
+- AT指令超时或出错时
+
+**示例**：
+```
+// 成功 - 信号质量查询
+{
+  "type": "l610_at_result",
+  "cmd": "AT+CSQ",
+  "result": "ok",
+  "response": "+CSQ: 25,99\r\nOK"
+}
+
+// 成功 - 网络附着状态
+{
+  "type": "l610_at_result",
+  "cmd": "AT+CGATT?",
+  "result": "ok",
+  "response": "+CGATT: 1\r\nOK"
+}
+
+// 超时
+{
+  "type": "l610_error",
+  "code": "L610_AT_TIMEOUT",
+  "msg": "L610 not responding after 3 retries"
+}
+```
+
+**常用AT指令参考**：
+| 指令 | 说明 | 预期响应 |
+|------|------|----------|
+| `AT` | 测试通信 | `OK` |
+| `AT+CSQ` | 信号质量 | `+CSQ: 25,99` |
+| `AT+CGATT?` | 网络附着 | `+CGATT: 1` |
+| `AT+CREG?` | 注册状态 | `+CREG: 0,1` |
+| `AT+MQTTLOG=1` | MQTT日志 | `OK` |
+
+---
+
+### 14.6 l610_status - L610模块状态 ⭐NEW v3.1
+
+**消息格式**：
+```json
+{
+  "type": "l610_status",
+  "l610_state": "READY",
+  "mqtt_state": "CONNECTED",
+  "signal_quality": 25,
+  "network_attached": true,
+  "current_host": "mqtt.thingskit.com",
+  "current_port": 1883
+}
+```
+
+**字段说明**：
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| type | string | 固定值 `"l610_status"` |
+| l610_state | string | 模块状态：`"INIT"` / `"READY"` / `"LOST"` |
+| mqtt_state | string | MQTT状态：`"DISCONNECTED"` / `"CONNECTING"` / `"CONNECTED"` |
+| signal_quality | number | 信号质量（0-31），99表示未知 |
+| network_attached | boolean | 网络附着状态 |
+| current_host | string | 当前MQTT服务器地址 |
+| current_port | number | 当前MQTT端口 |
+
+**触发时机**：
+- `l610_status`命令执行后
+- 心跳任务定期上报（可选）
+
+**L610状态说明**：
+| 状态 | 说明 |
+|------|------|
+| `INIT` | 模块初始化中 |
+| `READY` | 模块就绪，可以执行AT指令 |
+| `LOST` | 模块失联（连续3次AT超时） |
+
+**MQTT状态说明**：
+| 状态 | 说明 |
+|------|------|
+| `DISCONNECTED` | MQTT未连接 |
+| `CONNECTING` | 正在连接MQTT服务器 |
+| `CONNECTED` | MQTT已连接 |
+
+**示例**：
+```json
+// 正常状态
+{
+  "type": "l610_status",
+  "l610_state": "READY",
+  "mqtt_state": "CONNECTED",
+  "signal_quality": 25,
+  "network_attached": true,
+  "current_host": "mqtt.thingskit.com",
+  "current_port": 1883
+}
+
+// 模块失联
+{
+  "type": "l610_status",
+  "l610_state": "LOST",
+  "mqtt_state": "DISCONNECTED",
+  "signal_quality": 99,
+  "network_attached": false,
+  "current_host": "",
+  "current_port": 0
 }
 ```
 
@@ -783,23 +1153,28 @@ WS63                          ESP32                         L610
  │◄── mqtt_disconnected ────│                              │
 ```
 
-### 15.2 ClientID生成规则
+### 15.2 ClientID生成规则 ⭐ v3.2
 
-**格式**：`WS63-{MAC}`
+**格式**：`WS63-{TagID}`
 
 **示例**：
-- MAC地址：`AA:BB:CC:DD:EE:FF`
-- ClientID：`WS63-AA:BB:CC:DD:EE:FF`
+- Tag ID：`0x0001`
+- ClientID：`WS63-0x0001`
 
 **生成时机**：
-- 在`register`命令执行时生成
+- 在`register`命令执行时生成（使用tag_id字段）
 - 存储在`g_l610_client_id`全局变量
 - 每次`mqtt_connect`时自动使用
 
+**向后兼容**：
+- ⚠️ 如果使用旧版mac字段，ClientID将为 `WS63-AA:BB:CC:DD:EE:FF`
+- ✅ 推荐使用tag_id字段，ClientID更简洁且符合物联网规范
+
 **优势**：
 - ✅ 云端可通过ClientID识别设备来源
-- ✅ 每个设备有唯一标识
+- ✅ 每个设备有唯一标识（65000+唯一Tag ID）
 - ✅ 符合物联网设备命名规范
+- ✅ Tag ID比MAC地址更短，节省MQTT报文长度
 
 ---
 
@@ -984,13 +1359,14 @@ void protocol_handler_init(void) {
 
 ### B. 版本历史
 
+- **v3.2** (2026-05-19): Tag ID 改造（标识符升级、验证式更新流程）⭐
 - **v3.1** (2026-05-10): L610 4G模块完整集成
 - **v3.0** (2026-04-29): WS63协议支持
 - **v2.x**: 基础资产管理系统功能
 
 ---
 
-**文档版本**: v3.1  
-**最后更新**: 2026-05-10  
-**维护者**: CAM_AI开发团队  
-**反馈邮箱**: support@cam-ai.com
+**文档版本**: v3.2  
+**最后更新**: 2026-05-19  
+**维护者**: TcXc  
+**反馈邮箱**: 202500201056@stumail.sztu.edu.cn
