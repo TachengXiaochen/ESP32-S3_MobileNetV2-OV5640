@@ -297,4 +297,7 @@ Component config → ESP PSRAM → SPI RAM speed → 40MHz
 
 ---
 
+**维护者**: TcXc  
+**反馈邮箱**: 202500201056@stumail.sztu.edu.cn  
+
 **祝你使用愉快！** 🎉

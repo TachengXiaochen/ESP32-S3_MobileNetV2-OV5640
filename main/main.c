@@ -26,6 +26,7 @@
 #include "modules/system/asset_manager.h"
 #include "modules/system/cmd_handler.h"
 #include "modules/system/led_indicator.h"
+#include "modules/system/verify_handler.h"  // 验证处理器
 #include "modules/ai/feature_processor.h"
 #include "modules/system/protocol_handler.h"
 #include "modules/4g/l610_manager.h"
@@ -70,8 +71,8 @@ int g_views_enqueued = 0;
 int g_views_processed = 0;
 int g_total_views = 0;
 
-char g_current_mac[MAC_ADDR_LEN + 1] = {0};
-camera_state_t g_camera_state = CAM_STATE_WAITING_MAC;
+char g_current_tag_id[TAG_ID_STR_LEN] = {0};
+camera_state_t g_camera_state = CAM_STATE_WAITING_TAG_ID;
 view_state_t g_view_state = VIEW_NONE;
 bool g_camera_power_on = false;
 bool g_storage_initialized = false;
@@ -82,6 +83,9 @@ char g_reg_storage_area = 'A';
 uint32_t g_reg_quantity = 0;
 uint32_t g_outbound_quantity = 0;
 uint32_t g_outbound_original_qty = 0;
+
+// 验证上下文（用于验证式更新流程）
+verify_context_t g_verify_ctx = {0};
 
 // ========== 内部辅助函数（前向声明）==========
 static void system_shutdown_camera(void);
@@ -126,14 +130,14 @@ void print_system_info_uart(void)
              "  Min Free Heap:  %lu bytes\r\n"
              "  Camera State:   %s\r\n"
              "  Storage State:  %s\r\n"
-             "  Current MAC:    %s\r\n"
+             "  Current Tag ID: %s\r\n"
              "  Mode:           %s\r\n"
              "===========================================\r\n",
              (unsigned long)free_heap,
              (unsigned long)min_free_heap,
              g_camera_ready ? "READY" : "NOT READY",
              g_storage_ready ? "READY" : "NOT READY",
-             strlen(g_current_mac) > 0 ? g_current_mac : "N/A",
+             strlen(g_current_tag_id) > 0 ? g_current_tag_id : "N/A",
              g_is_inventory_mode ? "INVENTORY" : "REGISTRATION");
     
     uart_write_bytes(UART_NUM, (const char *)info_buf, strlen(info_buf));
@@ -145,7 +149,7 @@ static void system_shutdown_camera(void)
     led_camera_off();
     g_camera_power_on = false;
     camera_module_deinit();
-    g_camera_state = CAM_STATE_WAITING_MAC;
+    g_camera_state = CAM_STATE_WAITING_TAG_ID;
     g_view_state = VIEW_NONE;
     g_inventory_state = INVENTORY_IDLE;
     g_is_inventory_mode = false;
@@ -189,7 +193,7 @@ static void handle_capture_view(system_msg_t *msg)
             size_t jpeg_len = 0;
             if (camera_module_capture_jpeg(&jpeg_buf, &jpeg_len)) {
                 ESP_LOGI(TAG, "Captured JPEG image: %u bytes", (unsigned int)jpeg_len);
-                esp_err_t ret = storage_module_save_image(g_current_mac, view_label, jpeg_buf, jpeg_len);
+                esp_err_t ret = storage_module_save_image(g_current_tag_id, view_label, jpeg_buf, jpeg_len);
                 if (ret == ESP_OK) {
                     image_saved = true;
                     ESP_LOGI(TAG, "Image saved successfully");
@@ -210,7 +214,7 @@ static void handle_capture_view(system_msg_t *msg)
     inference_job_t job;
     memset(&job, 0, sizeof(job));
     job.view_cmd = msg->cmd;
-    snprintf(job.mac, sizeof(job.mac), "%s", g_current_mac);
+    snprintf(job.tag_id, sizeof(job.tag_id), "%s", g_current_tag_id);
     job.expected_views = g_total_views;
     job.is_registration = !g_is_inventory_mode && !g_is_outbound_mode;
     job.must_save_jpeg = !g_is_inventory_mode;
@@ -262,7 +266,7 @@ static void handle_save_asset(system_msg_t *msg)
         return;
     }
     
-    ESP_LOGI(TAG, "Storage task: Saving asset for MAC: %s", msg->mac);
+    ESP_LOGI(TAG, "Storage task: Saving asset for Tag ID: %s", msg->tag_id);
     save_result_t result = storage_module_save_asset((asset_record_t *)msg->data);
     
     if (result != SAVE_RESULT_FAILED) {
@@ -274,9 +278,9 @@ static void handle_save_asset(system_msg_t *msg)
             uart_write_bytes(UART_NUM, (const char *)"  Asset saved to SD card successfully.\r\n", 41);
         }
         
-        char mac_msg[64];
-        snprintf(mac_msg, sizeof(mac_msg), "  MAC: %s\r\n", msg->mac);
-        uart_write_bytes(UART_NUM, (const char *)mac_msg, strlen(mac_msg));
+        char tag_id_msg[64];
+        snprintf(tag_id_msg, sizeof(tag_id_msg), "  Tag ID: %s\r\n", msg->tag_id);
+        uart_write_bytes(UART_NUM, (const char *)tag_id_msg, strlen(tag_id_msg));
         uart_write_bytes(UART_NUM, (const char *)"  Camera: POWER OFF\r\n\r\n", 25);
         
         free(msg->data);
@@ -290,7 +294,7 @@ static void handle_save_asset(system_msg_t *msg)
 // ========== CMD_START_INVENTORY 处理 ==========
 static void handle_inventory_analysis(system_msg_t *msg)
 {
-    ESP_LOGI(TAG, "Starting inventory analysis for MAC: %s", msg->mac);
+    ESP_LOGI(TAG, "Starting inventory analysis for Tag ID: %s", msg->tag_id);
     
     asset_record_t *ref_record = (asset_record_t *)malloc(sizeof(asset_record_t));
     if (!ref_record) {
@@ -298,7 +302,7 @@ static void handle_inventory_analysis(system_msg_t *msg)
         return;
     }
     
-    esp_err_t ret = asset_load(msg->mac, ref_record);
+    esp_err_t ret = asset_load(msg->tag_id, ref_record);
     if (ret != ESP_OK) {
         uart_write_bytes(UART_NUM, (const char *)"Failed to load reference asset!\r\n", 34);
         free(ref_record);
@@ -354,7 +358,7 @@ static void handle_inventory_analysis(system_msg_t *msg)
              "  Weighted Confidence: %.4f\r\n"
              "  Dynamic Threshold:   %.2f\r\n"
              "  %s %s\r\n"
-             "  MAC: %s\r\n"
+             "  Tag ID: %s\r\n"
              "  Camera: POWER OFF\r\n"
              "===================================================\r\n",
              front_result.cosine_similarity, front_result.euclidean_similarity,
@@ -363,7 +367,7 @@ static void handle_inventory_analysis(system_msg_t *msg)
              side_result.mixed_similarity, side_result.confidence,
              top_result.cosine_similarity, top_result.euclidean_similarity,
              top_result.mixed_similarity, top_result.confidence,
-             weighted_conf, MATCH_THRESHOLD, match_symbol, match_result, msg->mac);
+             weighted_conf, MATCH_THRESHOLD, match_symbol, match_result, msg->tag_id);
     uart_write_bytes(UART_NUM, (const char *)result_msg, strlen(result_msg));
     
     free(ref_record);
@@ -373,7 +377,7 @@ static void handle_inventory_analysis(system_msg_t *msg)
 // ========== CMD_OUTBOUND_ANALYZE 处理 ==========
 static void handle_outbound_analyze(system_msg_t *msg)
 {
-    ESP_LOGI(TAG, "Starting outbound analysis for MAC: %s", msg->mac);
+    ESP_LOGI(TAG, "Starting outbound analysis for Tag ID: %s", msg->tag_id);
     
     asset_record_t *ref_record = (asset_record_t *)malloc(sizeof(asset_record_t));
     if (!ref_record) {
@@ -381,7 +385,7 @@ static void handle_outbound_analyze(system_msg_t *msg)
         return;
     }
     
-    esp_err_t ret = asset_load(msg->mac, ref_record);
+    esp_err_t ret = asset_load(msg->tag_id, ref_record);
     if (ret != ESP_OK) {
         uart_write_bytes(UART_NUM, (const char *)"Failed to load reference asset!\r\n", 34);
         free(ref_record);
@@ -418,13 +422,13 @@ static void handle_outbound_analyze(system_msg_t *msg)
              "  ----------------------------------------\r\n"
              "  Threshold:    %.2f\r\n"
              "  %s %s\r\n"
-             "  MAC: %s\r\n"
+             "  Tag ID: %s\r\n"
              "  Original Qty: %lu\r\n"
              "  Remove Qty:   %lu\r\n"
              "=========================================\r\n",
              out_result.cosine_similarity, out_result.euclidean_similarity,
              out_result.mixed_similarity, out_result.confidence,
-             MATCH_THRESHOLD, match_symbol, match_result_str, msg->mac,
+             MATCH_THRESHOLD, match_symbol, match_result_str, msg->tag_id,
              (unsigned long)g_outbound_original_qty,
              (unsigned long)g_outbound_quantity);
     uart_write_bytes(UART_NUM, (const char *)result_msg, strlen(result_msg));
@@ -432,7 +436,7 @@ static void handle_outbound_analyze(system_msg_t *msg)
     if (is_match) {
         system_msg_t update_msg = {0};
         update_msg.cmd = CMD_OUTBOUND_UPDATE_QTY;
-        snprintf(update_msg.mac, sizeof(update_msg.mac), "%s", msg->mac);
+        snprintf(update_msg.tag_id, sizeof(update_msg.tag_id), "%s", msg->tag_id);
         xQueueSend(xSystemQueue, &update_msg, portMAX_DELAY);
     } else {
         uart_write_bytes(UART_NUM, (const char *)"\r\n⚠️  OUTBOUND FAILED: Face mismatch!\r\n", 40);
@@ -446,8 +450,8 @@ static void handle_outbound_analyze(system_msg_t *msg)
 // ========== CMD_OUTBOUND_UPDATE_QTY 处理 ==========
 static void handle_outbound_update_qty(system_msg_t *msg)
 {
-    ESP_LOGI(TAG, "Updating quantity for outbound: MAC=%s, remove=%lu, original=%lu",
-             msg->mac, (unsigned long)g_outbound_quantity, (unsigned long)g_outbound_original_qty);
+    ESP_LOGI(TAG, "Updating quantity for outbound: Tag ID=%s, remove=%lu, original=%lu",
+             msg->tag_id, (unsigned long)g_outbound_quantity, (unsigned long)g_outbound_original_qty);
     
     asset_record_t *update_record = (asset_record_t *)malloc(sizeof(asset_record_t));
     if (!update_record) {
@@ -455,7 +459,7 @@ static void handle_outbound_update_qty(system_msg_t *msg)
         return;
     }
     
-    esp_err_t ret = asset_load(msg->mac, update_record);
+    esp_err_t ret = asset_load(msg->tag_id, update_record);
     if (ret != ESP_OK) {
         uart_write_bytes(UART_NUM, (const char *)"Failed to load asset for update!\r\n", 35);
         free(update_record);
@@ -470,7 +474,7 @@ static void handle_outbound_update_qty(system_msg_t *msg)
     
     bool is_overwrite = false;
     if (update_record->quantity == 0) {
-        asset_delete(msg->mac);
+        asset_delete(msg->tag_id);
         uart_write_bytes(UART_NUM, (const char *)"\r\n✅ OUTBOUND COMPLETE!\r\n", 22);
         char qty_msg[96];
         snprintf(qty_msg, sizeof(qty_msg),
@@ -492,9 +496,9 @@ static void handle_outbound_update_qty(system_msg_t *msg)
         }
     }
     
-    char mac_msg[64];
-    snprintf(mac_msg, sizeof(mac_msg), "  MAC: %s\r\n", msg->mac);
-    uart_write_bytes(UART_NUM, (const char *)mac_msg, strlen(mac_msg));
+    char tag_id_msg[64];
+    snprintf(tag_id_msg, sizeof(tag_id_msg), "  Tag ID: %s\r\n", msg->tag_id);
+    uart_write_bytes(UART_NUM, (const char *)tag_id_msg, strlen(tag_id_msg));
     uart_write_bytes(UART_NUM, (const char *)"  Original image saved.\r\n", 25);
     uart_write_bytes(UART_NUM, (const char *)"  Camera: POWER OFF\r\n\r\n", 25);
     
@@ -514,13 +518,13 @@ static void handle_inference_trigger(system_msg_t *msg)
         g_inventory_state = INVENTORY_COMPLETE;
         system_msg_t analyze_msg = {0};
         analyze_msg.cmd = CMD_OUTBOUND_ANALYZE;
-        snprintf(analyze_msg.mac, sizeof(analyze_msg.mac), "%s", g_current_mac);
+        snprintf(analyze_msg.tag_id, sizeof(analyze_msg.tag_id), "%s", g_current_tag_id);
         xQueueSend(xSystemQueue, &analyze_msg, portMAX_DELAY);
     } else if (g_is_inventory_mode) {
         g_inventory_state = INVENTORY_ANALYZING;
         system_msg_t analyze_msg = {0};
         analyze_msg.cmd = CMD_START_INVENTORY;
-        snprintf(analyze_msg.mac, sizeof(analyze_msg.mac), "%s", g_current_mac);
+        snprintf(analyze_msg.tag_id, sizeof(analyze_msg.tag_id), "%s", g_current_tag_id);
         ESP_LOGI(TAG, "Sending CMD_START_INVENTORY to queue...");
         xQueueSend(xSystemQueue, &analyze_msg, portMAX_DELAY);
         ESP_LOGI(TAG, "CMD_START_INVENTORY sent successfully");
@@ -532,7 +536,7 @@ static void handle_inference_trigger(system_msg_t *msg)
         
         asset_record_t *record = (asset_record_t *)malloc(sizeof(asset_record_t));
         if (record) {
-            snprintf(record->mac_address, sizeof(record->mac_address), "%s", g_current_mac);
+            snprintf(record->tag_id, sizeof(record->tag_id), "%s", g_current_tag_id);
             snprintf(record->item_name, sizeof(record->item_name), "%s", g_reg_item_name);
             record->storage_area = g_reg_storage_area;
             record->quantity = g_reg_quantity;
@@ -714,7 +718,7 @@ static void inference_task(void *pvParameters)
                 
                 system_msg_t trigger_msg = {0};
                 trigger_msg.cmd = CMD_INFERENCE_TRIGGER;
-                snprintf(trigger_msg.mac, sizeof(trigger_msg.mac), "%s", job.mac);
+                snprintf(trigger_msg.tag_id, sizeof(trigger_msg.tag_id), "%s", job.tag_id);
                 xQueueSend(xSystemQueue, &trigger_msg, portMAX_DELAY);
                 
                 g_views_enqueued = 0;

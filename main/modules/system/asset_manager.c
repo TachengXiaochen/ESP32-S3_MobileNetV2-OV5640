@@ -142,27 +142,49 @@ static void get_current_asset_dir(char *path, size_t path_size)
 
 /**
  * @brief 生成资产文件路径
+ * 
+ * ⭐ Tag ID 改造：
+ * - 旧格式：AA_BB_CC_DD_EE_FF.dat（MAC地址下划线转义）
+ * - 新格式：0x0001.dat（直接使用 Tag ID）
+ * 
+ * 检测逻辑：如果输入以 "0x" 开头，按 Tag ID 格式处理；
+ * 否则按旧 MAC 地址格式处理（向后兼容）。
  */
-static void get_asset_file_path(const char *mac_address, char *path, size_t path_size, const char *extension)
+static void get_asset_file_path(const char *identifier, char *path, size_t path_size, const char *extension)
 {
     char asset_dir[64];
     get_current_asset_dir(asset_dir, sizeof(asset_dir));
 
-    // ✅ 修复：将MAC地址中的':'替换为'_'作为文件名（符合FATFS 8.3格式限制）
-    // 例如: AA:BB:CC:DD:EE:FF -> AA_BB_CC_DD_EE_FF.dat
-    char safe_mac[MAC_ADDR_LEN + 1];
-    strncpy(safe_mac, mac_address, MAC_ADDR_LEN);
-    safe_mac[MAC_ADDR_LEN] = '\0';
+    char safe_name[64] = {0};
     
-    for (int i = 0; i < strlen(safe_mac); i++) {
-        if (safe_mac[i] == ':') {
-            safe_mac[i] = '_';
+    // ⭐ 检测是否为 Tag ID 格式（以 "0x" 开头）
+    if (identifier != NULL && (strncmp(identifier, "0x", 2) == 0 || strncmp(identifier, "0X", 2) == 0)) {
+        // Tag ID 格式：直接使用，无需转义
+        // 例如: 0x0001.dat
+        strncpy(safe_name, identifier, sizeof(safe_name) - 1);
+        ESP_LOGI(TAG, "Tag ID format detected: %s", identifier);
+    } else {
+        // 旧 MAC 地址格式：将 ':' 替换为 '_'
+        // 例如: AA:BB:CC:DD:EE:FF -> AA_BB_CC_DD_EE_FF.dat
+        if (identifier != NULL) {
+            size_t copy_len = strlen(identifier);
+            if (copy_len > sizeof(safe_name) - 1) {
+                copy_len = sizeof(safe_name) - 1;
+            }
+            strncpy(safe_name, identifier, copy_len);
+            safe_name[copy_len] = '\0';
+            
+            for (int i = 0; i < strlen(safe_name); i++) {
+                if (safe_name[i] == ':') {
+                    safe_name[i] = '_';
+                }
+            }
         }
+        ESP_LOGI(TAG, "Legacy MAC format detected: %s -> %s", identifier ? identifier : "NULL", safe_name);
     }
     
-    snprintf(path, path_size, "%s/%s.%s", asset_dir, safe_mac, extension);
-    
-    ESP_LOGI(TAG, "Generated filename: %s from MAC: %s", safe_mac, mac_address);
+    snprintf(path, path_size, "%s/%s.%s", asset_dir, safe_name, extension);
+    ESP_LOGD(TAG, "Generated file path: %s", path);
 }
 
 /**
@@ -202,7 +224,9 @@ esp_err_t asset_save(const asset_record_t *record, bool *is_overwrite)
     }
 
     char file_path[128];
-    get_asset_file_path(record->mac_address, file_path, sizeof(file_path), "dat");
+    // ⭐ 使用 tag_id 作为标识符（兼容旧 mac 地址格式）
+    const char *identifier = record->tag_id[0] ? record->tag_id : record->_legacy_mac;
+    get_asset_file_path(identifier, file_path, sizeof(file_path), "dat");
 
     // ✅ 检查文件是否已存在，判断是否为覆盖操作
     struct stat check_st;
@@ -213,9 +237,9 @@ esp_err_t asset_save(const asset_record_t *record, bool *is_overwrite)
     }
     
     if (overwrite) {
-        ESP_LOGW(TAG, "Asset already exists for MAC: %s, will overwrite", record->mac_address);
+        ESP_LOGW(TAG, "Asset already exists for %s, will overwrite", identifier);
     } else {
-        ESP_LOGI(TAG, "Creating new asset for MAC: %s", record->mac_address);
+        ESP_LOGI(TAG, "Creating new asset for %s", identifier);
     }
     
     ESP_LOGI(TAG, "Saving asset to: %s", file_path);
@@ -288,8 +312,8 @@ esp_err_t asset_save(const asset_record_t *record, bool *is_overwrite)
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "Asset saved successfully for MAC: %s (%s)", 
-             record->mac_address, overwrite ? "OVERWRITE" : "NEW");
+    ESP_LOGI(TAG, "Asset saved successfully for %s (%s)", 
+             identifier, overwrite ? "OVERWRITE" : "NEW");
     return ESP_OK;
 }
 
@@ -349,7 +373,8 @@ esp_err_t asset_load(const char *mac_address, asset_record_t *record)
     fclose(f);
 
     if (read_count == 1 && record->is_valid) {
-        ESP_LOGI(TAG, "Asset loaded successfully (new format) for MAC: %s", record->mac_address);
+        const char *loaded_id = record->tag_id[0] ? record->tag_id : record->_legacy_mac;
+        ESP_LOGI(TAG, "Asset loaded successfully (new format) for %s", loaded_id);
         return ESP_OK;
     }
 
@@ -366,9 +391,9 @@ esp_err_t asset_load(const char *mac_address, asset_record_t *record)
             return ESP_FAIL;
         }
         
-        // 按旧格式逐字段读取
+        // 按旧格式逐字段读取到 _legacy_mac 字段
         memset(record, 0, sizeof(asset_record_t));
-        fread(record->mac_address, MAC_ADDR_LEN + 1, 1, f);
+        fread(record->_legacy_mac, MAC_ADDR_LEN + 1, 1, f);
         fread(record->front_feature, sizeof(float), FEATURE_VEC_SIZE, f);
         fread(record->side_feature, sizeof(float), FEATURE_VEC_SIZE, f);
         fread(record->top_feature, sizeof(float), FEATURE_VEC_SIZE, f);
@@ -381,7 +406,7 @@ esp_err_t asset_load(const char *mac_address, asset_record_t *record)
         record->quantity = 0;
         
         if (record->is_valid) {
-            ESP_LOGI(TAG, "Old asset migrated successfully for MAC: %s", record->mac_address);
+            ESP_LOGI(TAG, "Old asset migrated successfully for %s", record->_legacy_mac);
             return ESP_OK;
         }
     }
@@ -578,26 +603,19 @@ esp_err_t asset_list_all(int *count)
     while ((entry = readdir(dir)) != NULL) {
         // 只处理.dat文件
         if (strstr(entry->d_name, ".dat") != NULL) {
-            // 将文件名中的'_'转换回':'显示
-            char mac_display[MAC_ADDR_LEN + 1];
-            strncpy(mac_display, entry->d_name, sizeof(mac_display) - 1);
-            mac_display[sizeof(mac_display) - 1] = '\0';
+            // Tag ID 直接显示文件名（不含扩展名）
+            char tag_id_display[TAG_ID_STR_LEN];
+            strncpy(tag_id_display, entry->d_name, TAG_ID_STR_LEN - 1);
+            tag_id_display[TAG_ID_STR_LEN - 1] = '\0';
             
             // 移除扩展名
-            char *dot = strstr(mac_display, ".dat");
+            char *dot = strstr(tag_id_display, ".dat");
             if (dot) {
                 *dot = '\0';
             }
             
-            // 将'_'转换回':'
-            for (int i = 0; i < strlen(mac_display); i++) {
-                if (mac_display[i] == '_') {
-                    mac_display[i] = ':';
-                }
-            }
-            
             char item_buf[64];
-            snprintf(item_buf, sizeof(item_buf), "  [%d] MAC: %s\r\n", asset_count + 1, mac_display);
+            snprintf(item_buf, sizeof(item_buf), "  [%d] Tag ID: %s\r\n", asset_count + 1, tag_id_display);
             uart_write_bytes(UART_NUM_0, item_buf, strlen(item_buf));
             asset_count++;
         }
@@ -807,42 +825,52 @@ void asset_list_uart(void)
         // ✅ 只显示.dat文件(与asset_save/asset_load保持一致)
         const char *ext = strrchr(entry->d_name, '.');
         if (ext && strcmp(ext, ".dat") == 0) {
-            // 提取MAC地址（文件名格式: XX_XX_XX_XX_XX_XX.dat）
-            char mac_display[32];
-            strncpy(mac_display, entry->d_name, sizeof(mac_display) - 1);
-            mac_display[sizeof(mac_display) - 1] = '\0';
+            // ⭐ 提取标识符显示名：先移除扩展名
+            char name_buf[32];
+            strncpy(name_buf, entry->d_name, sizeof(name_buf) - 1);
+            name_buf[sizeof(name_buf) - 1] = '\0';
+            char *dot = strrchr(name_buf, '.');
+            if (dot) *dot = '\0';
             
-            // 将下划线替换为冒号,并移除扩展名
-            for (int i = 0; mac_display[i] != '\0'; i++) {
-                if (mac_display[i] == '_') {
-                    mac_display[i] = ':';
-                } else if (mac_display[i] == '.') {
-                    mac_display[i] = '\0';  // 截断字符串,移除.dat扩展名
-                    break;
+            // ⭐ 检测是否为 Tag ID 格式（0x开头）
+            bool is_tag_id = (strncmp(name_buf, "0x", 2) == 0 || strncmp(name_buf, "0X", 2) == 0);
+            
+            char display_id[32];
+            if (is_tag_id) {
+                // Tag ID: 直接使用
+                snprintf(display_id, sizeof(display_id), "%s", name_buf);
+            } else {
+                // 旧MAC: 下划线 → 冒号
+                snprintf(display_id, sizeof(display_id), "%s", name_buf);
+                for (int i = 0; display_id[i] != '\0'; i++) {
+                    if (display_id[i] == '_') display_id[i] = ':';
                 }
             }
             
-            // 加载资产记录获取详细信息（堆分配避免栈溢出）
+            // 加载资产记录获取详细信息
             asset_record_t *record = (asset_record_t *)malloc(sizeof(asset_record_t));
             if (record) {
-                esp_err_t load_ret = asset_load(mac_display, record);
+                esp_err_t load_ret = asset_load(display_id, record);
                 
                 if (load_ret == ESP_OK && record->is_valid) {
+                    const char *label = is_tag_id ? "TAG" : "MAC";
                     char item_buf[192];
                     snprintf(item_buf, sizeof(item_buf), 
-                             "  [%d] MAC: %-17s | %-20s | %c | %lu\r\n",
-                             index++, mac_display, record->item_name, 
+                             "  [%d] %s: %-8s | %-20s | %c | %lu\r\n",
+                             index++, label, display_id, record->item_name, 
                              record->storage_area, (unsigned long)record->quantity);
                     uart_write_bytes(UART_NUM_0, item_buf, strlen(item_buf));
                 } else {
+                    const char *label = is_tag_id ? "TAG" : "MAC";
                     char item_buf[64];
-                    snprintf(item_buf, sizeof(item_buf), "  [%d] MAC: %s\r\n", index++, mac_display);
+                    snprintf(item_buf, sizeof(item_buf), "  [%d] %s: %s\r\n", index++, label, display_id);
                     uart_write_bytes(UART_NUM_0, item_buf, strlen(item_buf));
                 }
                 free(record);
             } else {
+                const char *label = is_tag_id ? "TAG" : "MAC";
                 char item_buf[64];
-                snprintf(item_buf, sizeof(item_buf), "  [%d] MAC: %s\r\n", index++, mac_display);
+                snprintf(item_buf, sizeof(item_buf), "  [%d] %s: %s\r\n", index++, label, display_id);
                 uart_write_bytes(UART_NUM_0, item_buf, strlen(item_buf));
             }
         }
@@ -857,9 +885,9 @@ void asset_list_uart(void)
 }
 
 /**
- * @brief 保存资产图片到当前存储介质
+ * @brief 保存资产图片到当前存储介质 ⭐ 支持Tag ID格式
  */
-esp_err_t asset_save_image(const char *mac_address, const char *view_name, 
+esp_err_t asset_save_image(const char *identifier, const char *view_name, 
                            const uint8_t *jpeg_data, size_t jpeg_len)
 {
     if (!g_storage_initialized) {
@@ -867,29 +895,43 @@ esp_err_t asset_save_image(const char *mac_address, const char *view_name,
         return ESP_ERR_INVALID_STATE;
     }
 
-    if (!mac_address || !view_name || !jpeg_data || jpeg_len == 0) {
+    if (!identifier || !view_name || !jpeg_data || jpeg_len == 0) {
         ESP_LOGE(TAG, "Invalid parameters for saving image");
         return ESP_ERR_INVALID_ARG;
     }
 
-    // 生成图片文件路径：/sdcard/assets/MAC_VIEW.jpg
+    // 生成图片文件路径：/sdcard/assets/{ID}_{VIEW}.jpg
     char file_path[128];
     char asset_dir[64];
     get_current_asset_dir(asset_dir, sizeof(asset_dir));
 
-    // ✅ 将MAC地址中的':'替换为'_'
-    char safe_mac[MAC_ADDR_LEN + 1];
-    strncpy(safe_mac, mac_address, MAC_ADDR_LEN);
-    safe_mac[MAC_ADDR_LEN] = '\0';
+    char safe_name[64] = {0};
     
-    for (int i = 0; i < strlen(safe_mac); i++) {
-        if (safe_mac[i] == ':') {
-            safe_mac[i] = '_';
+    // ⭐ 检测是否为 Tag ID 格式（以 "0x" 开头）
+    if (strncmp(identifier, "0x", 2) == 0 || strncmp(identifier, "0X", 2) == 0) {
+        // Tag ID 格式：直接使用，无需转义
+        // 例如: 0x0001_front.jpg
+        strncpy(safe_name, identifier, sizeof(safe_name) - 1);
+        ESP_LOGI(TAG, "Tag ID format detected for image: %s", identifier);
+    } else {
+        // 旧 MAC 地址格式：将 ':' 替换为 '_'
+        // 例如: AA:BB:CC:DD:EE:FF_front.jpg
+        size_t copy_len = strlen(identifier);
+        if (copy_len > sizeof(safe_name) - 1) {
+            copy_len = sizeof(safe_name) - 1;
         }
+        strncpy(safe_name, identifier, copy_len);
+        safe_name[copy_len] = '\0';
+        for (int i = 0; i < strlen(safe_name); i++) {
+            if (safe_name[i] == ':') {
+                safe_name[i] = '_';
+            }
+        }
+        ESP_LOGI(TAG, "Legacy MAC format detected for image: %s -> %s", identifier, safe_name);
     }
     
-    // 生成文件名：AA_BB_CC_DD_EE_FF_front.jpg
-    snprintf(file_path, sizeof(file_path), "%s/%s_%s.jpg", asset_dir, safe_mac, view_name);
+    // 生成文件名：{safe_name}_{view}.jpg
+    snprintf(file_path, sizeof(file_path), "%s/%s_%s.jpg", asset_dir, safe_name, view_name);
     
     ESP_LOGI(TAG, "Saving image to: %s (%u bytes)", file_path, (unsigned int)jpeg_len);
 

@@ -19,7 +19,8 @@
 
 // WS63 协议缓冲区大小
 #define WS63_JSON_BUF_SIZE      2048
-#define WS63_MAC_ADDR_LEN       17  // "XX:XX:XX:XX:XX:XX" + null terminator
+#define WS63_TAG_ID_LEN         6   // "0xFFFF" = 6字符
+#define WS63_TAG_ID_STR_LEN     7   // 含终止符
 
 // WS63 任务配置
 #define WS63_TASK_STACK_SIZE    4096
@@ -52,23 +53,26 @@ typedef enum {
 typedef struct {
     system_cmd_t cmd;
     void *data;
-    char mac[MAC_ADDR_LEN + 1];
+    char tag_id[TAG_ID_STR_LEN];  // ⭐ Tag ID替代MAC地址
 } system_msg_t;
 
-// 摄像头状态枚举
+// 摄像头状态枚举 ⭐ 改用Tag ID相关命名
 typedef enum {
-    CAM_STATE_WAITING_MAC = 0,        // 主菜单状态，等待模式选择
-    CAM_STATE_WAITING_REG_MAC = 1,    // 等待注册MAC地址
+    CAM_STATE_WAITING_TAG_ID = 0,     // 主菜单状态，等待模式选择 ⭐
+    CAM_STATE_WAITING_REG_TAG_ID = 1, // 等待注册Tag ID ⭐
     CAM_STATE_WAITING_REG_NAME = 2,   // 等待输入物品名称
     CAM_STATE_WAITING_REG_AREA = 3,   // 等待输入存放区域
     CAM_STATE_WAITING_REG_QUANTITY = 4, // 等待输入数量
-    CAM_STATE_WAITING_INV_MAC = 5,    // 等待盘点MAC地址
-    CAM_STATE_WAITING_DEL_MAC = 6,    // 等待删除MAC地址
-    CAM_STATE_WAITING_DEL_CONFIRM = 7, // 等待删除确认
-    CAM_STATE_WAITING_OUT_MAC = 8,    // 等待出库MAC地址
-    CAM_STATE_WAITING_OUT_QTY = 9,    // 等待出库数量
-    CAM_STATE_READY_OUT = 10,         // 出库就绪状态，等待拍摄正视图
-    CAM_STATE_READY = 11              // 就绪状态，可以拍摄
+    CAM_STATE_VERIFYING_EXISTING = 5, // ⭐NEW: 验证已存在的资产（显示现有信息）
+    CAM_STATE_WAITING_VERIFY_CAPTURE = 6, // ⭐NEW: 等待拍摄正视图进行验证
+    CAM_STATE_WAITING_REG_ADD_QTY = 7,    // ⭐NEW: 验证通过后等待输入累加数量
+    CAM_STATE_WAITING_INV_TAG_ID = 8, // ⭐ 盘点Tag ID
+    CAM_STATE_WAITING_DEL_TAG_ID = 9, // ⭐ 删除Tag ID
+    CAM_STATE_WAITING_DEL_CONFIRM = 10, // 等待删除确认
+    CAM_STATE_WAITING_OUT_TAG_ID = 11,  // ⭐ 出库Tag ID
+    CAM_STATE_WAITING_OUT_QTY = 12,     // 等待出库数量
+    CAM_STATE_READY_OUT = 13,           // 出库就绪状态，等待拍摄正视图
+    CAM_STATE_READY = 14                // 就绪状态，可以拍摄
 } camera_state_t;
 
 // 视图状态枚举（已在protocol_handler.h中定义为capture_view_t）
@@ -87,7 +91,7 @@ typedef enum {
 // 推理任务结构体（拍摄线程 → 推理线程）
 typedef struct {
     system_cmd_t view_cmd;          // CMD_CAPTURE_FRONT / SIDE / TOP
-    char mac[MAC_ADDR_LEN + 1];     // MAC地址
+    char tag_id[TAG_ID_STR_LEN];    // ⭐ Tag ID替代MAC地址
     int expected_views;             // 期望的总视图数 (注册/盘点=3, 出库=1)
     bool is_registration;           // 注册模式(true: 需保存JPEG, false: 盘点/出库)
     bool must_save_jpeg;            // 是否必须保存JPEG(注册模式)
@@ -98,7 +102,7 @@ extern QueueHandle_t xSystemQueue;
 extern QueueHandle_t xStorageQueue;
 extern QueueHandle_t xInferenceQueue;  // 推理任务队列
 extern SemaphoreHandle_t xCameraMutex; // 摄像头访问互斥锁
-extern char g_current_mac[];
+extern char g_current_tag_id[];     // ⭐ 替代 g_current_mac
 extern camera_state_t g_camera_state;
 extern view_state_t g_view_state;
 extern inventory_state_t g_inventory_state;

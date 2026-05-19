@@ -79,12 +79,12 @@ I (xxx) main: System initialization complete
 ### 2.1 L610模块通信测试
 
 **测试命令** (通过WS63串口发送):
-```json
+``json
 {"cmd":"l610_at","at":"AT"}
 ```
 
 **预期响应**:
-```json
+```
 {
   "type": "l610_at_result",
   "cmd": "AT",
@@ -100,12 +100,12 @@ I (xxx) main: System initialization complete
 ### 2.2 信号质量查询
 
 **命令**:
-```json
+``json
 {"cmd":"l610_at","at":"AT+CSQ"}
 ```
 
 **预期响应**:
-```json
+```
 {
   "type": "l610_at_result",
   "cmd": "AT+CSQ",
@@ -122,12 +122,12 @@ I (xxx) main: System initialization complete
 ### 2.3 网络附着状态
 
 **命令**:
-```json
+``json
 {"cmd":"l610_at","at":"AT+CGATT?"}
 ```
 
 **预期响应**:
-```json
+```
 {
   "type": "l610_at_result",
   "cmd": "AT+CGATT?",
@@ -245,7 +245,7 @@ I (xxx) l610_mqtt: MQTT publish URC received: +MQTTPUB: 1,0
 ```
 
 **Python脚本生成测试数据**:
-```python
+```
 import json
 
 payload = "A" * 1025  # 1025字节
@@ -260,7 +260,7 @@ print(json.dumps(cmd))
 ```
 
 **预期响应**:
-```json
+```
 {
   "type": "error",
   "code": "ERR_INVALID_SIZE",
@@ -310,7 +310,7 @@ E (xxx) l610_mqtt: Payload too long: 1025 bytes (max 1024)
 4. 观察WS63是否收到错误通知
 
 **预期响应**:
-```json
+```
 {
   "type": "l610_error",
   "code": "MQTT_DISCONNECTED",
@@ -342,7 +342,7 @@ E (xxx) l610_manager: L610 module lost! Consecutive timeouts: 3
 ```
 
 **预期上报**:
-```json
+```
 {
   "type": "l610_error",
   "code": "L610_NOT_RESPONDING",
@@ -372,7 +372,7 @@ E (xxx) l610_manager: L610 module lost! Consecutive timeouts: 3
 ### 5.1 连续发布测试
 
 **测试脚本** (Python):
-```python
+```
 import json
 import serial
 import time
@@ -427,7 +427,7 @@ print(f"Success rate: {success_count}/100 ({success_count}%)")
 ### 5.2 重连稳定性测试
 
 **测试脚本**:
-```python
+```
 import json
 import serial
 import time
@@ -738,7 +738,7 @@ idf.py menuconfig
 
 ---
 
-**文档版本**: v3.1  
-**更新日期**: 2026-05-10  
-**维护者**: CAM_AI开发团队  
-**反馈邮箱**: support@cam-ai.com
+**文档版本**: v3.2  
+**更新日期**: 2026-05-19  
+**维护者**: TcXc  
+**反馈邮箱**: 202500201056@stumail.sztu.edu.cn

@@ -1046,6 +1046,7 @@ CAM_STATE_WAITING_DEL_CONFIRM
 
 ---
 
-**最后更新时间**: 2026-04-29  
-**版本**: V3.0 (WS63协议完整版)  
-**维护者**: ESP32-S3 CAM AI Team
+**最后更新时间**: 2026-05-19  
+**版本**: V3.2 (Tag ID改造版)  
+**维护者**: TcXc  
+**反馈邮箱**: 202500201056@stumail.sztu.edu.cn

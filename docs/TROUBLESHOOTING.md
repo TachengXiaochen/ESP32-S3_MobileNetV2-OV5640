@@ -321,7 +321,7 @@ set(EXTRA_COMPONENT_DIRS
 - 如需调整，有两种方式：
 
 **方式1：修改默认阈值**
-```c
+```
 // 在 blur_detection.h 中修改
 static inline bool blur_detect_is_sharp_default(const image_t* img) {
     return blur_detect_is_sharp(img, 40.0f);  // 改为40.0
@@ -329,7 +329,7 @@ static inline bool blur_detect_is_sharp_default(const image_t* img) {
 ```
 
 **方式2：自定义阈值调用**
-```c
+```
 // 在代码中使用自定义阈值
 if (blur_detect_is_sharp(&img, 60.0f)) {
     // 使用更高阈值
@@ -379,12 +379,12 @@ if (blur_detect_is_sharp(&img, 60.0f)) {
 
 ```
 /sdcard/assets/
-├── AA_BB_CC_DD_EE_FF.dat    # 资产特征数据（三个1280维向量 + 元数据 + 详细信息）
+├── 0x0001.dat    # 资产特征数据（三个1280维向量 + 元数据 + 详细信息）
 └── ...
-```
 
 ---
 
-**文档版本**: V2.6  
-**最后更新**: 2026-04-29  
-**维护者**: ESP32-S3 CAM AI Team
+**文档版本**: V3.2  
+**最后更新**: 2026-05-19  
+**维护者**: TcXc  
+**反馈邮箱**: 202500201056@stumail.sztu.edu.cn

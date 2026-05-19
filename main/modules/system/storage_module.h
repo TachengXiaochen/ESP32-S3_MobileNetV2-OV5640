@@ -33,7 +33,7 @@ save_result_t storage_module_save_asset(const asset_record_t *record);
  * @param jpeg_len JPEG数据长度
  * @return ESP_OK表示成功
  */
-esp_err_t storage_module_save_image(const char *mac_address, const char *view_name, 
+esp_err_t storage_module_save_image(const char *tag_id, const char *view_name, 
                                     const uint8_t *jpeg_data, size_t jpeg_len);
 
 #endif // STORAGE_MODULE_H
