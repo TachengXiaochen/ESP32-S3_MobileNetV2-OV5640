@@ -6,6 +6,17 @@
 static const char *g_last_error = NULL;
 
 /**
+ * @brief 获取输入长度对应的 hex 位数（内部辅助）
+ * @return 2（短格式）或 4（标准格式），0 表示无效长度
+ */
+static int hex_digit_count_for_length(size_t len)
+{
+    if (len == TAG_ID_LEN)      return 4;  // "0x0001"
+    if (len == TAG_ID_LEN_SHORT) return 2;  // "0x01"
+    return 0;
+}
+
+/**
  * @brief 验证 Tag ID 字符串格式
  */
 bool tag_id_validator_validate(const char *tag_id)
@@ -18,8 +29,9 @@ bool tag_id_validator_validate(const char *tag_id)
     }
     
     size_t len = strlen(tag_id);
-    if (len != TAG_ID_LEN) {
-        g_last_error = "Length must be 6 characters (e.g. 0x0001)";
+    int hex_digits = hex_digit_count_for_length(len);
+    if (hex_digits == 0) {
+        g_last_error = "Length must be 4 (short, e.g. 0x01) or 6 (standard, e.g. 0x0001)";
         return false;
     }
     
@@ -29,8 +41,8 @@ bool tag_id_validator_validate(const char *tag_id)
         return false;
     }
     
-    // 验证4位十六进制字符
-    for (int i = 2; i < TAG_ID_LEN; i++) {
+    // 验证十六进制字符
+    for (int i = 2; i < (int)len; i++) {
         char c = tag_id[i];
         if (!((c >= '0' && c <= '9') ||
               (c >= 'A' && c <= 'F') ||
@@ -42,7 +54,7 @@ bool tag_id_validator_validate(const char *tag_id)
     
     // 验证范围：0x0001 - 0xFFFF
     uint16_t value = 0;
-    for (int i = 2; i < TAG_ID_LEN; i++) {
+    for (int i = 2; i < (int)len; i++) {
         value <<= 4;
         char c = tag_id[i];
         if (c >= '0' && c <= '9') {
@@ -69,6 +81,9 @@ bool tag_id_validator_validate(const char *tag_id)
 
 /**
  * @brief 标准化 Tag ID 为大写格式
+ * 
+ * 短格式（0x01）→ 标准格式（0x0001）
+ * 标准格式（0xabcd）→ 大写（0xABCD）
  */
 bool tag_id_validator_normalize(char *tag_id)
 {
@@ -78,17 +93,30 @@ bool tag_id_validator_normalize(char *tag_id)
     }
     
     size_t len = strlen(tag_id);
-    if (len != TAG_ID_LEN) {
-        g_last_error = "Length mismatch for normalization";
-        return false;
+    
+    if (len == TAG_ID_LEN_SHORT) {
+        // 短格式 "0x01" → "0x0001"
+        // 向后移动 2 个字节（在第 2 位后插入 "00"）
+        memmove(tag_id + 4, tag_id + 2, 3);  // 移动 "01\0" → 到位置 4,5,6
+        tag_id[2] = '0';
+        tag_id[3] = '0';
+        // 转换为大写
+        for (int i = 4; i < TAG_ID_LEN; i++) {
+            tag_id[i] = toupper((unsigned char)tag_id[i]);
+        }
+        tag_id[TAG_ID_LEN] = '\0';
+        return true;
+        
+    } else if (len == TAG_ID_LEN) {
+        // 标准格式：仅转大写
+        for (int i = 2; i < (int)len; i++) {
+            tag_id[i] = toupper((unsigned char)tag_id[i]);
+        }
+        return true;
     }
     
-    // 转换为大写：0x 前缀保持小写，十六进制字符转大写
-    for (int i = 2; i < (int)len; i++) {
-        tag_id[i] = toupper((unsigned char)tag_id[i]);
-    }
-    
-    return true;
+    g_last_error = "Length must be 4 (short) or 6 (standard) for normalization";
+    return false;
 }
 
 /**
@@ -105,8 +133,9 @@ bool tag_id_validator_parse(const char *tag_id, uint16_t *out_val)
         return false;
     }
     
+    size_t len = strlen(tag_id);
     uint16_t value = 0;
-    for (int i = 2; i < TAG_ID_LEN; i++) {
+    for (int i = 2; i < (int)len; i++) {
         value <<= 4;
         char c = tag_id[i];
         if (c >= '0' && c <= '9') {
