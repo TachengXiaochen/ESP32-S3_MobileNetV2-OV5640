@@ -1,9 +1,10 @@
 # WS63 ↔ ESP32-S3 通信协议规范
 
-> **文档版本**: v3.2  
-> **最后更新**: 2026-05-19  
+> **文档版本**: v3.3  
+> **最后更新**: 2026-05-26  
 > **适用项目**: CAM_AI (ESP32-S3 视觉感知物资管理子节点)  
 > **主要更新**: 
+> - **v3.3**: 补全缺失命令（delete/cancel/get_asset/ping），完善下行命令体系 ⭐NEW
 > - **v3.2**: Tag ID 改造（标识符从MAC地址升级为16位Tag ID，新增验证式更新流程）⭐
 > - v3.1: L610 4G模块完整集成（MQTT云端通信、主动上报机制）
 > - v3.0: WS63协议支持（JSON格式UART通信）
@@ -173,7 +174,8 @@
   "tag_id": "0x0001",
   "item_name": "扳手",
   "storage_area": "A",
-  "quantity": 50
+  "quantity": 50,
+  "is_overwrite": false
 }
 ```
 
@@ -186,11 +188,12 @@
 | item_name | string | ✅ | 物品名称（验证模式时可选） |
 | storage_area | string | ✅ | 存放区域（验证模式时可选） |
 | quantity | number | ✅ | 数量（首次注册）或累加数量（验证模式） |
+| is_overwrite | bool | ❌ | 是否允许覆写已有资产。默认 `false`（安全保护）。`true`=允许覆写，`false`=拒绝覆写。不传此字段时等效于 `false` |
 
 > *`tag_id`和`mac`二选一，推荐使用`tag_id`
 
 **完整注册响应**：
-```json
+```
 {
   "type": "task_done",
   "task": "register",
@@ -312,24 +315,45 @@ ESP32: 拍摄正视图 → 提取特征 → 计算相似度
 > *`tag_id`和`mac`二选一，推荐使用`tag_id`
 
 **执行流程**：
-1. ESP32引导拍摄三视图（正面、侧面、顶部）
-2. 每帧采集3张图像进行多帧融合
-3. 提取MobileNetV2特征向量（1280维）
-4. 计算加权综合置信度
-5. 返回盘点结果
+1. ESP32收到盘点命令，立即先查询资产数据库
+2. **返回资产基本信息**（名称、数量、区域）
+3. 引导拍摄三视图（正面、侧面、顶部）
+4. 每帧采集3张图像进行多帧融合
+5. 提取MobileNetV2特征向量（1280维）
+6. 计算加权综合置信度
+7. 返回盘点结果
 
-**响应**：
+**资产信息消息**（ESP32 → WS63，在盘点命令收到后立即返回）：
+```json
+{
+  "type": "asset_info",
+  "task": "inventory",
+  "tag_id": "0x0001",
+  "item_name": "扳手",
+  "storage_area": "A",
+  "quantity": 50
+}
+```
+
+**WS63 可依据 `asset_info` 中的信息在串口屏上显示资产详情，
+以便用户在拍照前确认资产身份。**
+
+**盘点完成响应**：
 ```json
 {
   "type": "task_done",
   "task": "inventory",
   "result": "success",
-  "matched_asset": {
-    "tag_id": "0x0001",
-    "item_name": "扳手",
-    "confidence": 0.92,
-    "blur_scores": [87.3, 91.2, 84.6]
-  }
+  "tag_id": "0x0001",
+  "item_name": "扳手",
+  "storage_area": "A",
+  "quantity": 50,
+  "is_match": true,
+  "weighted_confidence": 0.88,
+  "front_confidence": 0.92,
+  "side_confidence": 0.85,
+  "top_confidence": 0.83,
+  "threshold": 0.75
 }
 ```
 
@@ -358,7 +382,59 @@ ESP32: 拍摄正视图 → 提取特征 → 计算相似度
 
 > *`tag_id`和`mac`二选一，推荐使用`tag_id`
 
-**特点**：仅拍摄正视图，快速比对
+**执行流程**（分步控制）：
+1. ESP32收到出库命令，立即查询资产数据库
+2. **返回资产基本信息**（名称、数量、出库数、剩余数）
+3. 等待 WS63 发送 `capture` 命令（硬件不提前初始化）
+4. 收到 `capture front` 后初始化 AI + 摄像头
+5. 拍摄正视图 → 提取特征 → 与参考特征比对
+6. 匹配成功则更新数量（减去 remove_qty）
+7. 返回盘点结果
+
+**资产信息消息**（ESP32 → WS63，在出库命令收到后立即返回）：
+```json
+{
+  "type": "asset_info",
+  "task": "outbound",
+  "tag_id": "0x0001",
+  "item_name": "扳手",
+  "storage_area": "A",
+  "quantity": 50,
+  "remove_qty": 5,
+  "remaining_qty": 45
+}
+```
+
+**WS63 可依据 `asset_info` 中的信息在串口屏上显示出库详情（物品名称、当前库存、出库数量、出库后剩余），用户确认后再发送 `capture` 命令拍照验证。**
+
+**完整时序交互**：
+```
+WS63                           ESP32
+  │                               │
+  │── {"cmd":"outbound",          │
+  │    "tag_id":"0x0001",         │
+  │    "remove_qty":5}            │
+  │                               │── asset_load → 读取资产记录
+  │◄── asset_info ──────────────│  (立即返回，此时未初始化硬件)
+  │    {item_name:"扳手",          │
+  │     quantity:50,               │
+  │     remove_qty:5,              │
+  │     remaining_qty:45}          │
+  │                               │
+  │── {"cmd":"capture",           │  ← WS63 收到 asset_info 后确认无误
+  │    "view":"front"}            │    再发送 capture 命令
+  │                               │── ai_module_init() 【此刻才初始化】
+  │                               │── camera_module_init()
+  │                               │── 拍摄 → 特征提取 → 匹配
+  │                               │── 匹配成功则更新数量
+  │◄── task_done ───────────────│
+  │    {result:"success",          │
+  │     is_match:true,             │
+  │     item_name:"扳手",           │
+  │     original_qty:50,           │
+  │     remove_qty:5,              │
+  │     remaining_qty:45}          │
+```
 
 **响应示例**：
 ```
@@ -368,9 +444,13 @@ ESP32: 拍摄正视图 → 提取特征 → 计算相似度
   "result": "success",
   "tag_id": "0x0001",
   "item_name": "扳手",
-  "previous_qty": 50,
-  "removed_qty": 5,
-  "new_qty": 45
+  "is_match": true,
+  "confidence": 0.92,
+  "threshold": 0.75,
+  "original_qty": 50,
+  "remove_qty": 5,
+  "remaining_qty": 45,
+  "asset_deleted": false
 }
 ```
 
@@ -403,29 +483,324 @@ ESP32: 拍摄正视图 → 提取特征 → 计算相似度
 
 ---
 
-### 6.5 get_assets - 查询资产列表 ⭐ v3.2
+### 6.5 delete - 删除资产 ⭐ v3.2
+
+**Tag ID格式**：`0x0001-0xFFFF`
 
 **命令格式**：
 ```json
-{"cmd":"get_assets"}
+{
+  "cmd": "delete",
+  "tag_id": "0x0001"
+}
 ```
 
-**响应**：
-```json
+**字段说明**：
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| cmd | string | ✅ | 固定值"delete" |
+| tag_id | string | ✅* | Tag ID（格式：0x0001-0xFFFF）⭐替代mac |
+| mac | string | ❌* | 旧MAC地址格式（向后兼容，与tag_id二选一） |
+
+> *`tag_id`和`mac`二选一，推荐使用`tag_id`
+
+**⚠️ 重要提示**：
+- WS63 应在发送此命令前自行完成用户确认
+- ESP32 收到后**直接执行删除**，不再二次确认
+- 删除操作不可恢复，会同时删除资产记录文件和JPEG图像
+
+**响应示例**：
+```
+// 成功
 {
-  "type": "asset_list",
-  "count": 3,
-  "assets": [
-    {"tag_id":"0x0001","item_name":"扳手","storage_area":"A","quantity":50},
-    {"tag_id":"0x0002","item_name":"螺丝刀","storage_area":"B","quantity":30},
-    {"tag_id":"0x00AB","item_name":"钳子","storage_area":"A","quantity":20}
-  ]
+  "type": "task_done",
+  "task": "delete",
+  "result": "success",
+  "tag_id": "0x0001"
+}
+
+// 失败（资产不存在）
+{
+  "type": "error",
+  "code": "ERR_ASSET_NOT_FOUND",
+  "msg": "Asset not found: 0x0001"
 }
 ```
 
 ---
 
-### 6.6 sys_info - 查询系统信息
+### 6.6 cancel - 取消当前任务
+
+**命令格式**：
+```json
+{"cmd": "cancel"}
+```
+
+**功能说明**：
+- 立即中断正在执行的任务（register/inventory/outbound）
+- 关闭摄像头，释放资源，重置状态机
+- **唯一能在 BUSY 状态下响应的业务命令**
+
+**适用场景**：
+- 用户主动中止操作
+- 检测到异常情况需要紧急停止
+- 超时保护机制触发
+
+**执行流程**：
+1. 检查当前是否有正在执行的任务
+2. 如果有，安全终止拍摄和推理过程
+3. 关闭摄像头硬件
+4. 清理临时资源（特征缓冲区等）
+5. 重置状态机到 IDLE
+
+**响应示例**：
+```
+// 成功取消注册任务
+{
+  "type": "task_done",
+  "task": "register",
+  "result": "cancelled"
+}
+
+// 成功取消盘点任务
+{
+  "type": "task_done",
+  "task": "inventory",
+  "result": "cancelled"
+}
+
+// 无任务可取消（空闲状态）
+{
+  "type": "error",
+  "code": "ERR_INVALID_STATE",
+  "msg": "No active task to cancel"
+}
+```
+
+**状态机影响**：
+```
+CAPTURING ──[cancel]──► CLEANING ──[完成]──► IDLE
+FINALIZING ──[cancel]──► CLEANING ──[完成]──► IDLE
+```
+
+---
+
+### 6.7 get_asset - 查询单个资产详情 ⭐ v3.2
+
+**Tag ID格式**：`0x0001-0xFFFF`
+
+**命令格式**：
+```json
+{
+  "cmd": "get_asset",
+  "tag_id": "0x0001"
+}
+```
+
+**字段说明**：
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| cmd | string | ✅ | 固定值"get_asset" |
+| tag_id | string | ✅* | Tag ID（格式：0x0001-0xFFFF）⭐替代mac |
+| mac | string | ❌* | 旧MAC地址格式（向后兼容，与tag_id二选一） |
+
+> *`tag_id`和`mac`二选一，推荐使用`tag_id`
+
+**功能说明**：
+- 根据 Tag ID 查询单个资产的详细信息
+- **可在 BUSY 状态下执行**（不阻塞业务任务）
+- 返回资产元数据和统计信息
+
+**响应示例**：
+```
+// 资产存在
+{
+  "type": "asset_detail",
+  "found": true,
+  "tag_id": "0x0001",
+  "item_name": "扳手",
+  "storage_area": "A",
+  "quantity": 50,
+  "created_at": "2026-05-19T10:30:00Z",
+  "updated_at": "2026-05-19T15:45:00Z",
+  "file_size_kb": 45,
+  "has_images": true,
+  "image_count": 3
+}
+
+// 资产不存在
+{
+  "type": "asset_detail",
+  "found": false,
+  "tag_id": "0x0001"
+}
+```
+
+**字段说明**：
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| type | string | 固定值"asset_detail" |
+| found | boolean | 资产是否存在 |
+| tag_id | string | 资产Tag ID |
+| item_name | string | 物品名称（仅found=true时） |
+| storage_area | string | 存放区域（仅found=true时） |
+| quantity | number | 当前数量（仅found=true时） |
+| created_at | string | 创建时间ISO8601格式（仅found=true时） |
+| updated_at | string | 最后更新时间（仅found=true时） |
+| file_size_kb | number | 资产文件大小KB（仅found=true时） |
+| has_images | boolean | 是否有JPEG图像（仅found=true时） |
+| image_count | number | 图像数量（0-3，仅found=true时） |
+
+---
+
+### 6.8 ping - 心跳检测
+
+**命令格式**：
+```json
+{"cmd": "ping"}
+```
+
+**功能说明**：
+- 用于检测 ESP32 是否在线和正常工作
+- **可在 BUSY 状态下执行**（不阻塞业务任务）
+- 返回系统关键组件状态和健康指标
+
+**适用场景**：
+- WS63 定期健康检查（建议间隔30秒）
+- 任务下发前确认设备就绪
+- 故障诊断和远程调试
+
+**响应示例**：
+```
+{
+  "type": "pong",
+  "camera_ready": true,
+  "storage_ready": true,
+  "ai_model_loaded": true,
+  "current_state": "idle",
+  "heap_free": 125000,
+  "uptime_sec": 3600
+}
+```
+
+**字段说明**：
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| type | string | 固定值"pong" |
+| camera_ready | boolean | 摄像头是否就绪 |
+| storage_ready | boolean | SD卡是否挂载成功 |
+| ai_model_loaded | boolean | AI模型是否加载 |
+| current_state | string | 当前状态机状态："idle"/"initializing"/"capturing"/"finalizing" |
+| heap_free | number | 可用堆内存（字节） |
+| uptime_sec | number | 系统运行时间（秒） |
+
+**状态说明**：
+| current_state | 含义 | 是否可接受新任务 |
+|--------------|------|----------------|
+| idle | 空闲 | ✅ 是 |
+| initializing | 初始化中 | ❌ 否 |
+| capturing | 拍摄中 | ❌ 否 |
+| finalizing | 处理中 | ❌ 否 |
+
+**异常响应**：
+```
+// 摄像头未就绪
+{
+  "type": "pong",
+  "camera_ready": false,
+  "storage_ready": true,
+  "ai_model_loaded": true,
+  "current_state": "idle",
+  "heap_free": 120000,
+  "uptime_sec": 3600
+}
+
+// SD卡未挂载
+{
+  "type": "pong",
+  "camera_ready": true,
+  "storage_ready": false,
+  "ai_model_loaded": true,
+  "current_state": "idle",
+  "heap_free": 125000,
+  "uptime_sec": 3600
+}
+```
+
+---
+
+### 6.9 list_assets_page - 分页查询资产列表 ⭐ v3.4
+
+**命令格式**：
+```json
+{
+  "cmd": "list_assets_page",
+  "page": 1,
+  "page_size": 6
+}
+```
+
+**字段说明**：
+| 字段 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| cmd | string | ✅ | - | 固定值"list_assets_page" |
+| page | number | ❌ | 1 | 页码，从1开始 |
+| page_size | number | ❌ | 6 | 每页条数（1-100） |
+
+**功能说明**：
+- 支持分页查询资产列表，避免一次返回过多数据导致串口屏卡顿
+- 返回总记录数和总页数，方便串口屏渲染分页控件
+- 可在 **IDLE 状态下执行**（不阻塞业务任务）
+
+**响应格式**：
+```json
+{
+  "type": "asset_list_page",
+  "page": 1,
+  "page_size": 6,
+  "total_count": 23,
+  "total_pages": 4,
+  "assets": [
+    {"tag_id":"0x0001","item_name":"扳手","storage_area":"A","quantity":50},
+    {"tag_id":"0x0002","item_name":"螺丝刀","storage_area":"B","quantity":30},
+    {"tag_id":"0x00AB","item_name":"钳子","storage_area":"A","quantity":20},
+    {"tag_id":"0x0005","item_name":"锤子","storage_area":"C","quantity":15},
+    {"tag_id":"0x0007","item_name":"电钻","storage_area":"B","quantity":8},
+    {"tag_id":"0x0009","item_name":"螺丝","storage_area":"A","quantity":200}
+  ]
+}
+```
+
+**字段说明**：
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| type | string | 固定值"asset_list_page" |
+| page | number | 当前页码 |
+| page_size | number | 每页条数 |
+| total_count | number | 资产总数 |
+| total_pages | number | 总页数 |
+| assets | array | 资产对象数组（最多 page_size 条） |
+
+**串口屏分页交互示例**：
+```
+串口屏                          WS63                        ESP32
+  │                               │                            │
+  │── 进入资产列表页               │                            │
+  │                               │── list_assets_page        │
+  │                               │   {"page":1,"page_size":6}│
+  │                               │◄── asset_list_page ──────│
+  │                               │   {page:1, total_pages:4} │
+  │◄── 渲染第1页 "第1/4页"                               │
+  │── 点击"下一页"                  │                            │
+  │                               │── list_assets_page        │
+  │                               │   {"page":2,"page_size":6}│
+  │                               │◄── asset_list_page ──────│
+  │◄── 渲染第2页                                              │
+```
+
+---
+
+### 6.10 sys_info - 查询系统信息
 
 **命令格式**：
 ```json
@@ -1361,6 +1736,7 @@ void protocol_handler_init(void) {
 
 ### B. 版本历史
 
+- **v3.3** (2026-05-26): 补全缺失命令（delete/cancel/get_asset/ping），完善下行命令体系 ⭐NEW
 - **v3.2** (2026-05-19): Tag ID 改造（标识符升级、验证式更新流程）⭐
 - **v3.1** (2026-05-10): L610 4G模块完整集成
 - **v3.0** (2026-04-29): WS63协议支持
@@ -1368,7 +1744,7 @@ void protocol_handler_init(void) {
 
 ---
 
-**文档版本**: v3.2  
-**最后更新**: 2026-05-19  
+**文档版本**: v3.3  
+**最后更新**: 2026-05-26  
 **维护者**: TcXc  
 **反馈邮箱**: 202500201056@stumail.sztu.edu.cn
