@@ -88,6 +88,7 @@ static esp_err_t ws63_handle_capture(cJSON *json_obj);
 static esp_err_t ws63_handle_delete(cJSON *json_obj);
 static esp_err_t ws63_handle_cancel(void);
 static esp_err_t ws63_handle_list_assets(void);
+static esp_err_t ws63_handle_list_assets_page(cJSON *json_obj);
 static esp_err_t ws63_handle_get_asset(cJSON *json_obj);
 static esp_err_t ws63_handle_sys_info(void);
 static esp_err_t ws63_handle_ping(void);
@@ -149,6 +150,7 @@ static const char* cmd_strings[] = {
     "delete",
     "cancel",
     "list_assets",
+    "list_assets_page",
     "get_asset",
     "sys_info",
     "ping",
@@ -273,6 +275,9 @@ esp_err_t protocol_handle_command(const char *json_str)
             break;
         case CMD_LIST_ASSETS:
             ret = ws63_handle_list_assets();
+            break;
+        case CMD_LIST_ASSETS_PAGE:
+            ret = ws63_handle_list_assets_page(json_obj);
             break;
         case CMD_GET_ASSET:
             ret = ws63_handle_get_asset(json_obj);
@@ -756,6 +761,7 @@ static ws63_cmd_t ws63_parse_cmd(const char *cmd_str)
     if (strcmp(cmd_str, "delete") == 0) return CMD_DELETE;
     if (strcmp(cmd_str, "cancel") == 0) return CMD_CANCEL;
     if (strcmp(cmd_str, "list_assets") == 0) return CMD_LIST_ASSETS;
+    if (strcmp(cmd_str, "list_assets_page") == 0) return CMD_LIST_ASSETS_PAGE;
     if (strcmp(cmd_str, "get_asset") == 0) return CMD_GET_ASSET;
     if (strcmp(cmd_str, "sys_info") == 0) return CMD_SYS_INFO;
     if (strcmp(cmd_str, "ping") == 0) return CMD_PING;
@@ -924,6 +930,46 @@ static esp_err_t ws63_handle_register(cJSON *json_obj)
     }
     
     // ===== 完整注册流程（新资产或回退）=====
+    // ⭐ 解析 is_overwrite 字段（可选，默认 false — 保护已有资产）
+    bool allow_overwrite = false;
+    cJSON *overwrite_item = cJSON_GetObjectItem(json_obj, "is_overwrite");
+    if (overwrite_item && cJSON_IsBool(overwrite_item)) {
+        allow_overwrite = cJSON_IsTrue(overwrite_item);
+        ESP_LOGI(TAG, "is_overwrite=%s from WS63 command", allow_overwrite ? "true" : "false");
+    }
+
+    // ⭐ 前置检查：资产是否已存在（避免无意义的硬件初始化和拍摄流程）
+    const char *check_id = g_ws63_tag_id[0] ? g_ws63_tag_id : g_ws63_mac;
+    if (check_id && check_id[0] != '\0') {
+        asset_record_t existing_check;
+        esp_err_t check_ret = asset_load(check_id, &existing_check);
+        if (check_ret == ESP_OK && existing_check.is_valid) {
+            if (!allow_overwrite) {
+                ESP_LOGW(TAG, "Asset %s already exists, overwrite NOT allowed (is_overwrite=false)", check_id);
+                // 构建协议一致的错误响应
+                cJSON *err = cJSON_CreateObject();
+                if (err) {
+                    cJSON_AddStringToObject(err, "type", "task_done");
+                    cJSON_AddStringToObject(err, "task", "register");
+                    cJSON_AddStringToObject(err, "tag_id", g_ws63_tag_id);
+                    cJSON_AddStringToObject(err, "result", "error");
+                    cJSON_AddStringToObject(err, "error_code", "asset_exists");
+                    cJSON_AddBoolToObject(err, "is_overwrite", false);
+                    cJSON_AddStringToObject(err, "message", "资产已存在且不允许覆写");
+                    char *js = cJSON_PrintUnformatted(err);
+                    if (js) {
+                        ws63_send_json_raw(js);
+                        free(js);
+                    }
+                    cJSON_Delete(err);
+                }
+                ws63_reset_state();
+                return ESP_ERR_INVALID_STATE;
+            }
+            ESP_LOGI(TAG, "Asset %s exists, overwrite allowed by WS63 (is_overwrite=true)", check_id);
+        }
+    }
+    
     // 验证必填字段
     cJSON *item_name_item = cJSON_GetObjectItem(json_obj, "item_name");
     cJSON *storage_area_item = cJSON_GetObjectItem(json_obj, "storage_area");
@@ -1085,6 +1131,27 @@ static esp_err_t ws63_handle_inventory(cJSON *json_obj)
     memcpy(g_ws63_side_feature, ref_record.side_feature, sizeof(g_ws63_side_feature));
     memcpy(g_ws63_top_feature, ref_record.top_feature, sizeof(g_ws63_top_feature));
     
+    // ⭐ 先返回资产基本信息，再进入拍照流程
+    char asset_info_buf[512];
+    cJSON *info_obj = cJSON_CreateObject();
+    if (info_obj) {
+        cJSON_AddStringToObject(info_obj, "type", "asset_info");
+        cJSON_AddStringToObject(info_obj, "task", "inventory");
+        cJSON_AddStringToObject(info_obj, "tag_id", g_ws63_tag_id[0] ? g_ws63_tag_id : g_ws63_mac);
+        cJSON_AddStringToObject(info_obj, "item_name", g_ws63_item_name);
+        cJSON_AddStringToObject(info_obj, "storage_area", (char[2]){g_ws63_storage_area, '\0'});
+        cJSON_AddNumberToObject(info_obj, "quantity", g_ws63_quantity);
+        char *js = cJSON_PrintUnformatted(info_obj);
+        if (js) {
+            strncpy(asset_info_buf, js, sizeof(asset_info_buf) - 1);
+            free(js);
+        }
+        cJSON_Delete(info_obj);
+    }
+    ws63_send_json_raw(asset_info_buf);
+    ESP_LOGI(TAG, "Asset info sent for inventory: %s, qty=%lu, area=%c",
+             g_ws63_item_name, (unsigned long)g_ws63_quantity, g_ws63_storage_area);
+    
     // 更新状态
     g_ws63_state = WS63_STATE_INITIALIZING;
     
@@ -1194,40 +1261,35 @@ static esp_err_t ws63_handle_outbound(cJSON *json_obj)
     // 保存参考特征（仅正面）
     memcpy(g_ws63_front_feature, ref_record.front_feature, sizeof(g_ws63_front_feature));
     
-    // 更新状态
-    g_ws63_state = WS63_STATE_INITIALIZING;
-    
-    // 初始化AI模块
-    if (!ai_module_init()) {
-        char error_buf[256];
-        protocol_generate_error_response(ERR_AI_MODEL_FAIL, "AI model initialization failed", 
-                                        error_buf, sizeof(error_buf));
-        ws63_send_json_raw(error_buf);
-        ws63_reset_state();
-        return ESP_FAIL;
+    // ⭐ 发送资产基本信息，让WS63在拍照前先显示
+    char asset_info_buf[512];
+    cJSON *info_obj = cJSON_CreateObject();
+    if (info_obj) {
+        cJSON_AddStringToObject(info_obj, "type", "asset_info");
+        cJSON_AddStringToObject(info_obj, "task", "outbound");
+        cJSON_AddStringToObject(info_obj, "tag_id", g_ws63_tag_id[0] ? g_ws63_tag_id : g_ws63_mac);
+        cJSON_AddStringToObject(info_obj, "item_name", g_ws63_item_name);
+        cJSON_AddStringToObject(info_obj, "storage_area", (char[2]){g_ws63_storage_area, '\0'});
+        cJSON_AddNumberToObject(info_obj, "quantity", g_ws63_quantity);
+        cJSON_AddNumberToObject(info_obj, "remove_qty", g_ws63_remove_qty);
+        cJSON_AddNumberToObject(info_obj, "remaining_qty", g_ws63_original_qty - g_ws63_remove_qty);
+        char *js = cJSON_PrintUnformatted(info_obj);
+        if (js) {
+            strncpy(asset_info_buf, js, sizeof(asset_info_buf) - 1);
+            free(js);
+        }
+        cJSON_Delete(info_obj);
     }
+    ws63_send_json_raw(asset_info_buf);
+    ESP_LOGI(TAG, "Asset info sent for outbound: %s, qty=%lu, remove=%lu",
+             g_ws63_item_name, (unsigned long)g_ws63_quantity, (unsigned long)g_ws63_remove_qty);
     
-    // 初始化摄像头
-    if (!camera_module_init()) {
-        char error_buf[256];
-        protocol_generate_error_response(ERR_CAMERA_FAIL, "Camera initialization failed", 
-                                        error_buf, sizeof(error_buf));
-        ws63_send_json_raw(error_buf);
-        ws63_reset_state();
-        return ESP_FAIL;
-    }
-    
-    // 发送初始化完成响应
-    char progress_buf[256];
-    protocol_generate_capture_progress(g_ws63_mac, VIEW_NONE, "0/1", "ready", 0.0f, 
-                                      progress_buf, sizeof(progress_buf));
-    ws63_send_json_raw(progress_buf);
-    
-    // 更新状态为等待拍摄
+    // ⭐ 不初始化硬件，等待WS63发capture命令后再初始化
+    // 设状态为 WAITING_CAPTURE，硬件初始化推迟到 capture 时再执行
     g_ws63_state = WS63_STATE_WAITING_CAPTURE;
     
-    ESP_LOGI(TAG, "Outbound command accepted: MAC=%s, Remove=%lu, Original=%lu",
-             g_ws63_mac, (unsigned long)g_ws63_remove_qty, (unsigned long)g_ws63_original_qty);
+    ESP_LOGI(TAG, "Outbound command accepted: MAC=%s, Item=%s, Remove=%lu, Original=%lu",
+             g_ws63_mac, g_ws63_item_name, (unsigned long)g_ws63_remove_qty, (unsigned long)g_ws63_original_qty);
     
     return ESP_OK;
 }
@@ -1301,6 +1363,28 @@ static esp_err_t ws63_handle_capture(cJSON *json_obj)
         }
     }
     
+    // ⭐ 懒加载：如果硬件尚未初始化（如 outbound 路径），在此处初始化
+    // register 和 inventory 已在 handle 函数中预先初始化了硬件
+    if (g_ws63_current_task == CMD_OUTBOUND) {
+        // outbound 的硬件初始化推迟到第一次 capture 时执行
+        if (!ai_module_init()) {
+            char error_buf[256];
+            protocol_generate_error_response(ERR_AI_MODEL_FAIL, "AI model initialization failed", 
+                                            error_buf, sizeof(error_buf));
+            ws63_send_json_raw(error_buf);
+            ws63_reset_state();
+            return ESP_FAIL;
+        }
+        if (!camera_module_init()) {
+            char error_buf[256];
+            protocol_generate_error_response(ERR_CAMERA_FAIL, "Camera initialization failed", 
+                                            error_buf, sizeof(error_buf));
+            ws63_send_json_raw(error_buf);
+            ws63_reset_state();
+            return ESP_FAIL;
+        }
+    }
+    
     // 更新状态
     g_ws63_state = WS63_STATE_CAPTURING;
     
@@ -1323,9 +1407,83 @@ static esp_err_t ws63_handle_capture(cJSON *json_obj)
             return ret;
         }
     } else {
-        // 还有更多视图需要拍摄，返回等待状态
-        g_ws63_state = WS63_STATE_WAITING_CAPTURE;
+        // 还有视图需要拍摄，发送 capture_done 响应
+        char response_buf[256];
+        protocol_generate_capture_done(view, g_ws63_captured_views, g_ws63_total_views,
+                                      response_buf, sizeof(response_buf));
+        ws63_send_json_raw(response_buf);
     }
+    
+    return ESP_OK;
+}
+
+/**
+ * @brief 处理查询单个资产详情命令
+ */
+static esp_err_t ws63_handle_get_asset(cJSON *json_obj)
+{
+    // ⭐ v3.3: 支持 Tag ID 查询，可在任何状态下执行
+    
+    // 验证必填字段：tag_id
+    cJSON *tag_id_item = cJSON_GetObjectItem(json_obj, "tag_id");
+    if (!tag_id_item || !cJSON_IsString(tag_id_item)) {
+        char error_buf[256];
+        protocol_generate_error_response(ERR_MISSING_FIELD, "Missing 'tag_id' field", 
+                                        error_buf, sizeof(error_buf));
+        ws63_send_json_raw(error_buf);
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    // 验证 Tag ID 格式
+    const char *tag_id = tag_id_item->valuestring;
+    char normalized_tag[TAG_ID_STR_LEN];
+    strncpy(normalized_tag, tag_id, TAG_ID_STR_LEN - 1);
+    normalized_tag[TAG_ID_STR_LEN - 1] = '\0';
+    tag_id_validator_normalize(normalized_tag);
+    
+    if (!tag_id_validator_validate(normalized_tag)) {
+        char error_buf[256];
+        protocol_generate_error_response(ERR_INVALID_TAG_ID, 
+            tag_id_validator_get_error_string(),
+            error_buf, sizeof(error_buf));
+        ws63_send_json_raw(error_buf);
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    // 加载资产
+    asset_record_t record;
+    esp_err_t ret = asset_load(normalized_tag, &record);
+    
+    // 生成响应
+    cJSON *json_obj_resp = cJSON_CreateObject();
+    if (json_obj_resp == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    
+    cJSON_AddStringToObject(json_obj_resp, "type", "asset_detail");
+    cJSON_AddStringToObject(json_obj_resp, "tag_id", normalized_tag);
+    
+    if (ret == ESP_OK) {
+        cJSON_AddBoolToObject(json_obj_resp, "found", true);
+        cJSON_AddStringToObject(json_obj_resp, "item_name", record.item_name);
+        cJSON_AddStringToObject(json_obj_resp, "storage_area", (char[2]){record.storage_area, '\0'});
+        cJSON_AddNumberToObject(json_obj_resp, "quantity", record.quantity);
+    } else {
+        cJSON_AddBoolToObject(json_obj_resp, "found", false);
+    }
+    
+    char *json_str = cJSON_PrintUnformatted(json_obj_resp);
+    if (json_str == NULL) {
+        cJSON_Delete(json_obj_resp);
+        return ESP_ERR_NO_MEM;
+    }
+    
+    ws63_send_json_raw(json_str);
+    free(json_str);
+    cJSON_Delete(json_obj_resp);
+    
+    ESP_LOGI(TAG, "Get asset command processed: TagID=%s, Found=%s", 
+             normalized_tag, ret == ESP_OK ? "true" : "false");
     
     return ESP_OK;
 }
@@ -1335,44 +1493,44 @@ static esp_err_t ws63_handle_capture(cJSON *json_obj)
  */
 static esp_err_t ws63_handle_delete(cJSON *json_obj)
 {
-    // 检查任务忙状态（删除命令可以在任何状态下执行，除了正在执行其他任务）
-    if (g_ws63_state != WS63_STATE_IDLE) {
-        char error_buf[256];
-        protocol_generate_error_response(ERR_TASK_BUSY, "Another task is in progress", 
-                                        error_buf, sizeof(error_buf));
-        ws63_send_json_raw(error_buf);
-        return ESP_ERR_INVALID_STATE;
-    }
+    // ⭐ v3.3: 删除命令可在任何状态下执行（除了正在执行其他删除操作）
+    // 注意：cancel 命令才是唯一用于中断任务的命令
     
-    // 验证必填字段
-    cJSON *mac_item = cJSON_GetObjectItem(json_obj, "mac");
-    if (!mac_item || !cJSON_IsString(mac_item)) {
+    // 验证必填字段：tag_id
+    cJSON *tag_id_item = cJSON_GetObjectItem(json_obj, "tag_id");
+    if (!tag_id_item || !cJSON_IsString(tag_id_item)) {
         char error_buf[256];
-        protocol_generate_error_response(ERR_MISSING_FIELD, "Missing 'mac' field", 
+        protocol_generate_error_response(ERR_MISSING_FIELD, "Missing 'tag_id' field", 
                                         error_buf, sizeof(error_buf));
         ws63_send_json_raw(error_buf);
         return ESP_ERR_INVALID_ARG;
     }
     
-    // 验证MAC地址格式
-    const char *mac = mac_item->valuestring;
-    if (ws63_validate_mac(mac) != ESP_OK) {
+    // 验证 Tag ID 格式
+    const char *tag_id = tag_id_item->valuestring;
+    char normalized_tag[TAG_ID_STR_LEN];
+    strncpy(normalized_tag, tag_id, TAG_ID_STR_LEN - 1);
+    normalized_tag[TAG_ID_STR_LEN - 1] = '\0';
+    tag_id_validator_normalize(normalized_tag);
+    
+    if (!tag_id_validator_validate(normalized_tag)) {
         char error_buf[256];
-        protocol_generate_error_response(ERR_INVALID_MAC, "Invalid MAC address format", 
-                                        error_buf, sizeof(error_buf));
+        protocol_generate_error_response(ERR_INVALID_TAG_ID, 
+            tag_id_validator_get_error_string(),
+            error_buf, sizeof(error_buf));
         ws63_send_json_raw(error_buf);
         return ESP_ERR_INVALID_ARG;
     }
     
     // 执行删除
-    esp_err_t ret = asset_delete(mac);
+    esp_err_t ret = asset_delete(normalized_tag);
     
     // 发送响应
     char response_buf[256];
     if (ret == ESP_OK) {
-        protocol_generate_task_done(CMD_DELETE, mac, "success", response_buf, sizeof(response_buf));
+        protocol_generate_task_done(CMD_DELETE, normalized_tag, "success", response_buf, sizeof(response_buf));
     } else if (ret == ESP_ERR_NOT_FOUND) {
-        protocol_generate_task_done(CMD_DELETE, mac, "failed", response_buf, sizeof(response_buf));
+        protocol_generate_task_done(CMD_DELETE, normalized_tag, "failed", response_buf, sizeof(response_buf));
     } else {
         protocol_generate_error_response(ERR_INTERNAL_ERROR, "Failed to delete asset", 
                                         response_buf, sizeof(response_buf));
@@ -1380,7 +1538,7 @@ static esp_err_t ws63_handle_delete(cJSON *json_obj)
     
     ws63_send_json_raw(response_buf);
     
-    ESP_LOGI(TAG, "Delete command processed: MAC=%s, Result=%s", mac, 
+    ESP_LOGI(TAG, "Delete command processed: TagID=%s, Result=%s", normalized_tag, 
              ret == ESP_OK ? "success" : "failed");
     
     return ret;
@@ -1455,6 +1613,158 @@ static esp_err_t ws63_handle_list_assets(void)
     ws63_send_json_raw(response_buf);
     
     ESP_LOGI(TAG, "List assets command processed: %d assets found", count);
+    
+    return ESP_OK;
+}
+
+/**
+ * @brief 处理分页查询资产列表命令 ⭐ v3.4
+ * WS63 → ESP32: {"cmd":"list_assets_page","page":1,"page_size":6}
+ * ESP32 → WS63: {"type":"asset_list_page","page":1,"page_size":6,
+ *                 "total_count":23,"total_pages":4,
+ *                 "assets":[{"tag_id":"0x0001","item_name":"扳手",...},...]}
+ */
+static esp_err_t ws63_handle_list_assets_page(cJSON *json_obj)
+{
+    // 解析 page 和 page_size（可选，默认 page=1, page_size=6）
+    int page = 1;
+    int page_size = 6;
+    
+    cJSON *page_item = cJSON_GetObjectItem(json_obj, "page");
+    cJSON *page_size_item = cJSON_GetObjectItem(json_obj, "page_size");
+    
+    if (page_item && cJSON_IsNumber(page_item)) {
+        int p = page_item->valueint;
+        if (p >= 1) page = p;
+    }
+    if (page_size_item && cJSON_IsNumber(page_size_item)) {
+        int ps = page_size_item->valueint;
+        if (ps >= 1 && ps <= 100) page_size = ps;
+    }
+    
+    // 初始化存储
+    extern bool storage_module_init(void);
+    if (!storage_module_init()) {
+        char error_buf[256];
+        protocol_generate_error_response(ERR_STORAGE_NOT_READY, "Storage not ready", 
+                                        error_buf, sizeof(error_buf));
+        ws63_send_json_raw(error_buf);
+        return ESP_FAIL;
+    }
+    
+    // 打开资产目录
+    DIR *dir = opendir("/sdcard/assets");
+    if (!dir) {
+        char error_buf[256];
+        protocol_generate_error_response(ERR_STORAGE_NOT_READY, "Cannot open assets directory",
+                                        error_buf, sizeof(error_buf));
+        ws63_send_json_raw(error_buf);
+        return ESP_FAIL;
+    }
+    
+    // 第一遍：统计总文件数，并收集所有 .dat 文件名
+    struct dirent *entry;
+    int total_count = 0;
+    char **all_names = NULL;
+    
+    while ((entry = readdir(dir)) != NULL) {
+        if (strstr(entry->d_name, ".dat") != NULL) {
+            total_count++;
+        }
+    }
+    
+    // 计算总页数
+    int total_pages = (total_count + page_size - 1) / page_size;
+    if (total_pages < 1) total_pages = 1;
+    
+    // 分配文件名数组
+    if (total_count > 0) {
+        all_names = (char **)malloc(total_count * sizeof(char *));
+        if (!all_names) {
+            closedir(dir);
+            return ESP_ERR_NO_MEM;
+        }
+        
+        // 第二遍：收集文件名
+        rewinddir(dir);
+        int idx = 0;
+        while ((entry = readdir(dir)) != NULL && idx < total_count) {
+            if (strstr(entry->d_name, ".dat") != NULL) {
+                all_names[idx] = strdup(entry->d_name);
+                if (all_names[idx]) {
+                    idx++;
+                }
+            }
+        }
+    }
+    closedir(dir);
+    
+    // 构建响应 JSON
+    cJSON *json_resp = cJSON_CreateObject();
+    if (!json_resp) {
+        for (int i = 0; i < total_count; i++) free(all_names[i]);
+        free(all_names);
+        return ESP_ERR_NO_MEM;
+    }
+    
+    cJSON_AddStringToObject(json_resp, "type", "asset_list_page");
+    cJSON_AddNumberToObject(json_resp, "page", page);
+    cJSON_AddNumberToObject(json_resp, "page_size", page_size);
+    cJSON_AddNumberToObject(json_resp, "total_count", total_count);
+    cJSON_AddNumberToObject(json_resp, "total_pages", total_pages);
+    
+    cJSON *assets_array = cJSON_CreateArray();
+    if (!assets_array) {
+        cJSON_Delete(json_resp);
+        for (int i = 0; i < total_count; i++) free(all_names[i]);
+        free(all_names);
+        return ESP_ERR_NO_MEM;
+    }
+    
+    // 计算当前页在全部列表中的起始/结束索引
+    int start_idx = (page - 1) * page_size;
+    int end_idx = start_idx + page_size;
+    if (end_idx > total_count) end_idx = total_count;
+    
+    for (int i = start_idx; i < end_idx; i++) {
+        if (!all_names[i]) continue;
+        
+        char tag_id[TAG_ID_STR_LEN];
+        strncpy(tag_id, all_names[i], TAG_ID_STR_LEN - 1);
+        tag_id[TAG_ID_STR_LEN - 1] = '\0';
+        char *dot = strstr(tag_id, ".dat");
+        if (dot) *dot = '\0';
+        
+        cJSON *asset_obj = cJSON_CreateObject();
+        if (asset_obj) {
+            cJSON_AddStringToObject(asset_obj, "tag_id", tag_id);
+            
+            asset_record_t record;
+            if (asset_load(tag_id, &record) == ESP_OK) {
+                cJSON_AddStringToObject(asset_obj, "item_name", record.item_name);
+                cJSON_AddStringToObject(asset_obj, "storage_area", (char[2]){record.storage_area, '\0'});
+                cJSON_AddNumberToObject(asset_obj, "quantity", record.quantity);
+            }
+            cJSON_AddItemToArray(assets_array, asset_obj);
+        }
+    }
+    
+    cJSON_AddItemToObject(json_resp, "assets", assets_array);
+    
+    // 清理文件名数组
+    for (int i = 0; i < total_count; i++) free(all_names[i]);
+    free(all_names);
+    
+    // 发送响应
+    char *json_str = cJSON_PrintUnformatted(json_resp);
+    if (json_str) {
+        ws63_send_json_raw(json_str);
+        free(json_str);
+    }
+    cJSON_Delete(json_resp);
+    
+    ESP_LOGI(TAG, "List assets page processed: page=%d/%d, total=%d", 
+             page, total_pages, total_count);
     
     return ESP_OK;
 }

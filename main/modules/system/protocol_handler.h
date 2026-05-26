@@ -17,7 +17,8 @@ typedef enum {
     CMD_CAPTURE,           // 单步拍摄视图
     CMD_DELETE,            // 删除资产
     CMD_CANCEL,            // 取消当前任务
-    CMD_LIST_ASSETS,       // 查询资产列表
+    CMD_LIST_ASSETS,       // 查询资产列表（已弃用，请使用 CMD_LIST_ASSETS_PAGE）
+    CMD_LIST_ASSETS_PAGE,  // ⭐ 分页查询资产列表
     CMD_GET_ASSET,         // 查询单个资产详情
     CMD_SYS_INFO,          // 查询系统信息
     CMD_PING,              // 心跳/状态检测
