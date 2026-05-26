@@ -1407,10 +1407,11 @@ static esp_err_t ws63_handle_capture(cJSON *json_obj)
             return ret;
         }
     } else {
-        // 还有视图需要拍摄，发送 capture_done 响应
-        char response_buf[256];
-        protocol_generate_capture_done(view, g_ws63_captured_views, g_ws63_total_views,
-                                      response_buf, sizeof(response_buf));
+        // 还有视图需要拍摄，发送 capture_progress 响应
+        char response_buf[512];
+        protocol_generate_capture_progress(g_ws63_mac, view, 
+                                          "1/3", "ok", 0.0f,
+                                          response_buf, sizeof(response_buf));
         ws63_send_json_raw(response_buf);
     }
     
@@ -1765,69 +1766,6 @@ static esp_err_t ws63_handle_list_assets_page(cJSON *json_obj)
     
     ESP_LOGI(TAG, "List assets page processed: page=%d/%d, total=%d", 
              page, total_pages, total_count);
-    
-    return ESP_OK;
-}
-
-/**
- * @brief 处理查询单个资产详情命令
- */
-static esp_err_t ws63_handle_get_asset(cJSON *json_obj)
-{
-    // 验证必填字段
-    cJSON *mac_item = cJSON_GetObjectItem(json_obj, "mac");
-    if (!mac_item || !cJSON_IsString(mac_item)) {
-        char error_buf[256];
-        protocol_generate_error_response(ERR_MISSING_FIELD, "Missing 'mac' field", 
-                                        error_buf, sizeof(error_buf));
-        ws63_send_json_raw(error_buf);
-        return ESP_ERR_INVALID_ARG;
-    }
-    
-    // 验证MAC地址格式
-    const char *mac = mac_item->valuestring;
-    if (ws63_validate_mac(mac) != ESP_OK) {
-        char error_buf[256];
-        protocol_generate_error_response(ERR_INVALID_MAC, "Invalid MAC address format", 
-                                        error_buf, sizeof(error_buf));
-        ws63_send_json_raw(error_buf);
-        return ESP_ERR_INVALID_ARG;
-    }
-    
-    // 加载资产
-    asset_record_t record;
-    esp_err_t ret = asset_load(mac, &record);
-    
-    // 生成响应
-    cJSON *json_obj_resp = cJSON_CreateObject();
-    if (json_obj_resp == NULL) {
-        return ESP_ERR_NO_MEM;
-    }
-    
-    cJSON_AddStringToObject(json_obj_resp, "type", "asset_detail");
-    cJSON_AddStringToObject(json_obj_resp, "mac", mac);
-    
-    if (ret == ESP_OK) {
-        cJSON_AddBoolToObject(json_obj_resp, "found", true);
-        cJSON_AddStringToObject(json_obj_resp, "item_name", record.item_name);
-        cJSON_AddStringToObject(json_obj_resp, "storage_area", (char[2]){record.storage_area, '\0'});
-        cJSON_AddNumberToObject(json_obj_resp, "quantity", record.quantity);
-    } else {
-        cJSON_AddBoolToObject(json_obj_resp, "found", false);
-    }
-    
-    char *json_str = cJSON_PrintUnformatted(json_obj_resp);
-    if (json_str == NULL) {
-        cJSON_Delete(json_obj_resp);
-        return ESP_ERR_NO_MEM;
-    }
-    
-    ws63_send_json_raw(json_str);
-    free(json_str);
-    cJSON_Delete(json_obj_resp);
-    
-    ESP_LOGI(TAG, "Get asset command processed: MAC=%s, Found=%s", 
-             mac, ret == ESP_OK ? "true" : "false");
     
     return ESP_OK;
 }
