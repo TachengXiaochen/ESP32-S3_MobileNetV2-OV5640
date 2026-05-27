@@ -1,11 +1,12 @@
-# WS63 ↔ 串口屏 通信协议（Page1-4）
+# WS63 ↔ 串口屏 通信协议（Page1-5）
 
 > **适用型号**: 淘晶驰 T1系列 4.3寸 480\*272  
 > **物理层**: UART, 115200bps, 8N1, 3.3V TTL  
 > **帧格式**: 逗号分隔文本帧（CSV-like），帧头 `#` / `@`，帧尾 `\r\n`  
 > **屏端模式**: `recmod=1` 主动解析  
-> **文档版本**: v2.2  
-> **最后更新**: 2026-05-26  
+> **文档版本**: v2.3  
+> **最后更新**: 2026-05-27  
+> **v2.3 更新**: 新增 Page5 设置（WiFi连接/断开、背光调节）；所有页面 b3 返回统一加 cancel 帧；同步代码汇总  
 > **v2.2 更新**: 新增 Page4 查找定位（分页列表+标签蜂鸣）；补全 ESP32 命令映射  
 > **v2.1 更新**: 对齐 PROTOCOL.md v3.3 outbound 分步流程（新增 #ASSET_INFO 帧、出库 asset_info 确认步骤、task_done 改用 is_match 判断）  
 > **v2.0 更新**: 新增 Page3 盘点；对齐 PROTOCOL.md v3.3（get_asset/inventory 命令映射、asset_detail/asset_info 下行帧）
@@ -182,7 +183,7 @@
   │   屏 → WS63: @in,confirm\r\n
   │   sys0 = 0
   │
-  └─ [b3] 返回menu → page 0
+  └─ [b3] 返回menu → @in,cancel\r\n → page 0
 ```
 
 ### 2.2 上行帧（串口屏 → WS63）
@@ -195,6 +196,7 @@
 | U1.4 | b5 | `@in,photo,side\r\n` | sys0==3 | 拍侧面视图 |
 | U1.5 | b6 | `@in,photo,top\r\n` | sys0==3 | 拍顶部视图 |
 | U1.6 | b7 | `@in,confirm\r\n` | sys0==4 | 确认入库 |
+| U1.7 | b3 | `@in,cancel\r\n` | 无限制 | 取消当前任务，返回menu |
 
 #### U1.2 mode 参数说明
 
@@ -292,7 +294,7 @@
   │   t5 = "确认出库完成"
   │   sys0 = 0
   │
-  └─ [b3] 返回menu → page 0
+  └─ [b3] 返回menu → @out,cancel\r\n → page 0
 ```
 
 ### 3.2 上行帧（串口屏 → WS63）
@@ -303,6 +305,7 @@
 | U2.2 | b4 | `@out,capture,<tag_id>,<out_count>\r\n` | sys0==1 且 t6非空 | 发送出库信息（触发 ESP32 查库） |
 | U2.3 | b5 | `@out,photo,front\r\n` | sys0==2 | ⚠️ v2.1: 拍正面（此时已收到 asset_info 确认） |
 | U2.4 | b7 | `@out,confirm\r\n` | sys0==4 | 确认出库（ESP32已完成扣减） |
+| U2.5 | b3 | `@out,cancel\r\n` | 无限制 | 取消当前任务，返回menu |
 
 ### 3.3 下行帧（WS63 → 串口屏）
 
@@ -405,7 +408,7 @@
   │   t5 = "比对通过! 相似度:0.93"
   │   sys0 = 4
   │
-  └─ [b3] 返回menu → page 0
+  └─ [b3] 返回menu → @check,cancel\r\n → page 0
 ```
 
 ### 4.2 上行帧（串口屏 → WS63）
@@ -418,6 +421,7 @@
 | U3.4 | b4 | `@check,photo,front\r\n` | sys0==3 | 拍正面 |
 | U3.5 | b5 | `@check,photo,side\r\n` | sys0==3 | 拍侧面 |
 | U3.6 | b6 | `@check,photo,top\r\n` | sys0==3 | 拍顶部 |
+| U3.7 | b3 | `@check,cancel\r\n` | 无限制 | 取消当前任务，返回menu |
 
 ### 4.3 下行帧（WS63 → 串口屏）
 
@@ -504,7 +508,7 @@
   ├─ [b1] 下一页  ←─ sys3<sys4
   │   sys3=sys3+1  →  @find,list,<sys3>  →  (同上)
   │
-  └─ [b3] 返回 → page 0
+  └─ [b3] 返回 → @find,cancel\r\n → page 0
 ```
 
 ### 5.3 上行帧（串口屏 → WS63）
@@ -516,6 +520,7 @@
 | U4.3 | b1 | `@find,list,<sys3>\r\n` | sys3<sys4 | 下一页（复用list） |
 | U4.4 | b2 | `@find,locate,<tag_id>\r\n` | sys5!=99 | 让选中标签蜂鸣/发光 |
 | U4.5 | b5 | `@find,stop\r\n` | 无限制 | 停止蜂鸣/发光 |
+| U4.6 | b3 | `@find,cancel\r\n` | 无限制 | 取消当前操作，返回menu |
 
 ### 5.4 下行帧（WS63 → 串口屏）
 
@@ -546,7 +551,72 @@
 
 ---
 
-## 六、状态机对照
+## 六、Page5 — 设置 (setting)
+
+### 6.1 操作流程
+
+```
+进入设置页 (page5)
+  │  t5="Status"  t3="WiFi_name"  t0="WiFi_pswd"  h0.val=100
+  │
+  ├─ h0 滑块拖动 → dim=h0.val (实时调背光，本地执行，无串口帧)
+  │
+  ├─ 收到 WS63 上电主动推送:
+  │   ← #NET,wifi,connected,-45
+  │   t5="WiFi已连接 信号:-45dBm"
+  │
+  ├─ 用户点击 t3 输入 → "MyWiFi"
+  ├─ 用户点击 t0 输入 → "12345678"
+  │
+  ├─ [b1] 连接 WiFi
+  │   屏 → WS63: @setting,wifi,MyWiFi,12345678\r\n
+  │   t5="正在连接 MyWiFi..."
+  │   ← #NET,wifi,connecting,
+  │   ← #WIFI,ok  或  #WIFI,fail
+  │   t5="WiFi连接成功!" 或 "WiFi连接失败"
+  │   ← #NET,wifi,connected,-45
+  │   t5="WiFi已连接 信号:-45dBm"
+  │   (同一WiFi下次自动连接，WS63存储凭据)
+  │
+  ├─ [b4] 断开连接
+  │   屏 → WS63: @setting,disconnect\r\n
+  │   t5="正在断开..."
+  │   ← #NET,wifi,disconnected,
+  │   t5="未连接"
+  │
+  └─ [b3] 返回 → @setting,cancel\r\n → page 0
+```
+
+### 6.2 上行帧（串口屏 → WS63）
+
+| # | 触发按钮 | 帧内容 | 条件 | 说明 |
+|---|----------|--------|------|------|
+| U5.1 | b1 | `@setting,wifi,<ssid>,<password>\r\n` | t3和t0非空且非占位符 | 连接WiFi |
+| U5.2 | b4 | `@setting,disconnect\r\n` | 无限制 | 断开当前网络连接 |
+| U5.3 | b3 | `@setting,cancel\r\n` | 无限制 | 取消当前操作，返回menu |
+
+### 6.3 下行帧（WS63 → 串口屏）
+
+| # | 帧内容 | 触发时机 | 屏端行为 |
+|---|--------|----------|----------|
+| D5.1 | `#NET,<mode>,<status>,<signal>\r\n` | 网络状态变化/上电推送 | t5显示网络状态 |
+| D5.2 | `#WIFI,<result>\r\n` | WiFi连接结果 | t5="连接成功!" / "连接失败" |
+| D5.3 | `#ERR,<code>,<msg>\r\n` | 错误发生时 | t5=msg |
+| D5.4 | `#MSG,<text>\r\n` | 通用通知 | t5=text |
+
+#### D5.1 字段说明
+
+| 字段 | 类型 | 示例值 | 说明 |
+|------|------|--------|------|
+| `mode` | 字符串 | `wifi` / `4g` | 网络模式 |
+| `status` | 字符串 | `connected` / `connecting` / `disconnected` | 连接状态 |
+| `signal` | 字符串 | `-45`（WiFi dBm）/ `25`（4G CSQ） | 信号强度，disconnected 时为空 |
+
+> **背光调节不走串口**：h0 滑块 → `dim=h0.val`，纯本地操作。
+
+---
+
+## 七、状态机对照
 
 | sys0 | 含义 | page1 in | page2 out | page3 check | page4 find |
 |------|------|:--:|:--:|:--:|:--:|
@@ -561,7 +631,7 @@
 
 ---
 
-## 七、WS63 处理逻辑参考
+## 八、WS63 处理逻辑参考
 
 ### 8.0 Tag ID 转换
 
@@ -570,7 +640,7 @@
 ESP32→WS63: "0x0001"  →  WS63内部: "0001"  →  屏: "0001"
 ```
 
-### 7.1 收到 `@in,start` / `@out,start`
+### 8.1 收到 `@in,start` / `@out,start`
 
 ```
 SLE扫描 → RSSI取最强标签 → 查询本地数据库:
@@ -584,7 +654,7 @@ SLE扫描 → RSSI取最强标签 → 查询本地数据库:
     标签不存在 → 发送 #ERR,ERR_ASSET_NOT_FOUND,标签未注册
 ```
 
-### 7.2 收到 `@in,capture,...` (根据 mode 区分)
+### 8.2 收到 `@in,capture,...` (根据 mode 区分)
 
 ```
 mode=0 (新注册, 6字段):
@@ -598,7 +668,7 @@ mode=2 (更新验证, 6字段):
   (⚠️ 不含 item_name/storage_area，ESP32自动进入验证模式)
 ```
 
-### 7.3 收到 `@out,capture,<id>,<qty>` ⭐v2.1
+### 8.3 收到 `@out,capture,<id>,<qty>` ⭐v2.1
 
 ```
 → ESP32: {"cmd":"outbound","tag_id":"0x0001","remove_qty":5}
@@ -612,13 +682,13 @@ ESP32 立即返回（未初始化硬件）:
   屏端显示确认信息，等待用户按 b5 拍摄正面
 ```
 
-### 7.4 收到 `@in,photo,<view>` / `@out,photo,front` / `@check,photo,<view>`
+### 8.4 收到 `@<page>,photo,<view>`
 
 ```
 → ESP32: {"cmd":"capture","view":"<view>"}
 ```
 
-### 7.5 ESP32回传 `capture_progress`
+### 8.5 ESP32回传 `capture_progress`
 
 ```
 {
@@ -635,7 +705,7 @@ ESP32 立即返回（未初始化硬件）:
 (step取"1/3"的分子, view原样, blur_score原样保留1位小数)
 ```
 
-### 7.6 ESP32回传 `task_done`
+### 8.6 ESP32回传 `task_done`
 
 ```
 register/success:
@@ -659,7 +729,7 @@ inventory/success:
      <0.75 → #DONE,check,mismatch,<confidence>\r\n
 ```
 
-### 7.7 ESP32回传 `verification_start`
+### 8.7 ESP32回传 `verification_start`
 
 ```
 {

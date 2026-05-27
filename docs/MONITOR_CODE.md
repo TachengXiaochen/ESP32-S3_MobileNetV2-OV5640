@@ -443,6 +443,8 @@ if(sys0!=4)
 
 
 // ===== b3: 返回menu =====
+prints "@in,cancel",0
+printh 0d 0a
 page 0
 ```
 
@@ -617,6 +619,8 @@ if(sys0!=4)
 
 
 // ===== b3: 返回menu =====
+prints "@out,cancel",0
+printh 0d 0a
 page 0
 ```
 
@@ -803,6 +807,8 @@ if(sys0!=3)
 
 
 // ===== b3: 返回menu =====
+prints "@check,cancel",0
+printh 0d 0a
 page 0
 ```
 
@@ -1186,14 +1192,186 @@ t8.txt="已停止定位"
 
 
 // ===== b3: 返回menu =====
+prints "@find,cancel",0
+printh 0d 0a
 page 0
 ```
 
 ---
 
-## 7. Page5 setting — 设置（预留）
+## 7. Page5 setting — 设置
 
-> 待开发。计划功能: 屏幕亮度调节、WiFi/4G 切换、系统信息查看。
+### 7.1 控件清单
+
+| 控件 | 类型 | 用途 | 属性 |
+|------|------|------|------|
+| t5 | Text | 状态显示 | txt="Status", txt_maxl=100, vscope=local |
+| t3 | Text | WiFi名称输入 | txt="WiFi_name", key=1, txt_maxl=30, vscope=local |
+| t0 | Text | WiFi密码输入 | txt="WiFi_pswd", key=1, txt_maxl=30, vscope=local |
+| h0 | Slider | 屏幕背光 | val=100, vscope=local |
+| va0 | Variable(字符串) | 帧缓冲区 | txt_maxl=200 |
+| b1 | Button | 连接WiFi | |
+| b3 | Button | 返回menu | |
+| b4 | Button | 断开连接 | txt="断开" |
+| m0 | Hotspot | 帧解析 | |
+| tm1 | Timer | 串口解析 | tim=50, en=1 |
+
+### 7.2 tm1 定时器
+
+```c
+while(usize>=3&&getFrameFlag==0)
+{
+  if(u[0]==0x23)
+  {
+    getFrameFlag=1
+  }else
+  {
+    udelete 1
+  }
+}
+
+if(getFrameFlag==1)
+{
+  sys1=1
+  sys2=usize
+  sys2=sys2-1
+  while(sys1<sys2)
+  {
+    if(u[sys1]==0x0d)
+    {
+      if(u[sys1+1]==0x0a)
+      {
+        frameLength=sys1+2
+        cmdLen=sys1
+        getFrameFlag=2
+        sys1=sys2
+      }
+    }
+    sys1=sys1+1
+  }
+}
+
+if(getFrameFlag==2)
+{
+  ucopy va0.txt,0,cmdLen,0
+  udelete frameLength
+  click m0,1
+  getFrameFlag=0
+}
+```
+
+### 7.3 m0 按下事件
+
+```c
+spstr va0.txt,t5.txt,",",0
+
+// === #NET,mode,status,signal ===
+if(t5.txt=="#NET")
+{
+  spstr va0.txt,t5.txt,",",1
+  spstr va0.txt,t3.txt,",",2
+  if(t3.txt=="connected")
+  {
+    spstr va0.txt,t3.txt,",",3
+    if(t5.txt=="wifi")
+    {
+      t5.txt="WiFi已连接 信号:"+t3.txt+"dBm"
+    }else
+    {
+      t5.txt="4G已连接 信号:"+t3.txt
+    }
+  }else if(t3.txt=="connecting")
+  {
+    if(t5.txt=="wifi")
+    {
+      t5.txt="WiFi连接中..."
+    }else
+    {
+      t5.txt="4G连接中..."
+    }
+  }else
+  {
+    t5.txt="未连接"
+  }
+}
+
+// === #WIFI,result ===
+if(t5.txt=="#WIFI")
+{
+  spstr va0.txt,t5.txt,",",1
+  if(t5.txt=="ok")
+  {
+    t5.txt="WiFi连接成功!"
+  }else
+  {
+    t5.txt="WiFi连接失败"
+  }
+}
+
+// === #ERR,code,msg ===
+if(t5.txt=="#ERR")
+{
+  spstr va0.txt,t5.txt,",",2
+}
+
+// === #MSG,text ===
+if(t5.txt=="#MSG")
+{
+  spstr va0.txt,t5.txt,",",1
+}
+```
+
+### 7.4 控件事件
+
+```c
+// ===== t3 按下: 清除占位符 =====
+if(t3.txt=="WiFi_name")
+{
+  t3.txt=""
+}
+
+// ===== t0 按下: 清除占位符 =====
+if(t0.txt=="WiFi_pswd")
+{
+  t0.txt=""
+}
+
+// ===== h0 弹起事件: 实时调背光 =====
+dim=h0.val
+```
+
+### 7.5 按钮事件
+
+```c
+// ===== b1: 连接 WiFi =====
+if(t3.txt=="WiFi_name"||t3.txt=="")
+{
+  t5.txt="请先输入WiFi名称"
+}else if(t0.txt=="WiFi_pswd"||t0.txt=="")
+{
+  t5.txt="请先输入WiFi密码"
+}else
+{
+  prints "@setting,wifi,",0
+  prints t3.txt,0
+  prints ",",0
+  prints t0.txt,0
+  printh 0d 0a
+  t5.txt="正在连接 "+t3.txt+"..."
+}
+
+// ===== b4: 断开连接 =====
+prints "@setting,disconnect",0
+printh 0d 0a
+t5.txt="正在断开..."
+
+// ===== b3: 返回menu =====
+prints "@setting,cancel",0
+printh 0d 0a
+page 0
+```
+
+---
 
 ---
 
