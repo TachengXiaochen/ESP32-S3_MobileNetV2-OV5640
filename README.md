@@ -1,6 +1,6 @@
-# ESP32-S3 CAM AI 资产管理系统 v3.3
+# ESP32-S3 CAM AI 资产管理系统 v3.4
 
-> 基于 **ESP32-S3 + OV5640摄像头 + MobileNetV2** 的智能资产管理系统，通过三视图加权综合判断实现高精度物品识别和盘点。**v3.3** 核心升级：补全 WS63 协议缺失命令（delete/cancel/get_asset/ping），完善下行命令体系。
+> 基于 **ESP32-S3 + OV5640摄像头 + MobileNetV2** 的智能资产管理系统，通过三视图加权综合判断实现高精度物品识别和盘点。**v3.4** 核心升级：引入 business_executor 业务执行器架构，重构 UART 通信层，GPIO 引脚冲突修复，outbound 分步控制优化。
 
 ---
 
@@ -18,6 +18,7 @@
 - 💡 **LED状态指示**：WS2812 RGB实时反馈系统状态
 - 📡 **WS63协议**：UART1 JSON通信，支持远程调度（v3.0）
 - 📶 **L610 4G模块**：MQTT云端通信 + 主动上报机制（v3.1）
+- 🏗️ **业务执行器架构** ⭐v3.4：business_executor 统一处理业务逻辑，双通道输出（CLI文本/JSON协议）
 
 ---
 
@@ -35,7 +36,7 @@
 
 ### 编译烧录
 
-```bash
+```
 # 1. 配置项目
 idf.py menuconfig
 
@@ -113,8 +114,8 @@ idf.py flash monitor
 
 ```
 WS63                          ESP32-S3
-├── RX ◄──────── GPIO17 (TX) ──┤
-├── TX ────────► GPIO18 (RX) ──┤
+├── RX ◄──────── GPIO47 (TX) ──┤  ⭐ v3.4: 从 GPIO17 迁移至 GPIO47，解决与摄像头 DVP 冲突
+├── TX ────────► GPIO21 (RX) ──┤  ⭐ v3.4: 从 GPIO18 迁移至 GPIO21
 └── GND ───────── GND ─────────┘
 ```
 
@@ -126,11 +127,13 @@ WS63                          ESP32-S3
 |------|------|------|
 | `register` | 资产注册（含验证式更新） | `{"cmd":"register","tag_id":"0x0001","item_name":"扳手","quantity":50}` |
 | `inventory` | 资产盘点 | `{"cmd":"inventory","item_name":"扳手"}` |
-| `outbound` | 出库核验 | `{"cmd":"outbound","tag_id":"0x0001","remove_qty":5}` |
+| `outbound` | 出库核验（分步控制）⭐v3.4 | `{"cmd":"outbound","tag_id":"0x0001","remove_qty":5}` |
 | `capture` | 分步拍摄 | `{"cmd":"capture","view":"front"}` |
 | `delete` | 删除资产 | `{"cmd":"delete","tag_id":"0x0001"}` |
 | `list_assets` | 查询列表 | `{"cmd":"list_assets"}` |
 | `sys_info` | 系统信息 | `{"cmd":"sys_info"}` |
+| `ping` | 心跳检测 ⭐v3.4 | `{"cmd":"ping"}` |
+| `get_asset` | 单个资产详情 ⭐v3.4 | `{"cmd":"get_asset","tag_id":"0x0001"}` |
 
 ### 上行消息
 
@@ -139,10 +142,45 @@ WS63                          ESP32-S3
 | `capture_progress` | 拍摄进度（含模糊度评分） |
 | `task_done` | 任务完成结果 |
 | `verification_start` | ⭐验证开始提示（v3.2） |
+| `asset_info` | ⭐资产信息查询结果（含 remove_qty/remaining_qty，v3.4） |
 | `asset_list` | 资产列表 |
+| `pong` | ⭐心跳响应（v3.4） |
+| `sys_info` | ⭐系统信息响应（v3.4） |
 | `error` | 错误报告 |
 
-**详细协议规范**：查看 [docs/PROTOCOL.md](docs/PROTOCOL.md)
+**详细协议规范**：查看 [docs/PROTOCOL/ESP32_WS63_PROTOCOL.md](docs/PROTOCOL/ESP32_WS63_PROTOCOL.md)
+
+### Outbound 分步控制流程 ⭐v3.4
+
+```
+WS63                           ESP32
+  │                               │
+  │── {"cmd":"outbound",          │
+  │    "tag_id":"0x0001",         │
+  │    "remove_qty":5}            │
+  │                               │── asset_load → 读取资产记录
+  │◄── asset_info ──────────────│  (立即返回，此时未初始化硬件)
+  │    {item_name:"扳手",          │
+  │     quantity:50,               │
+  │     remove_qty:5,              │
+  │     remaining_qty:45}          │
+  │                               │
+  │── {"cmd":"capture",           │  ← WS63 收到 asset_info 后确认无误
+  │    "view":"front"}            │    再发送 capture 命令
+  │                               │── ai_module_init() 【此刻才初始化】
+  │                               │── camera_module_init()
+  │                               │── 拍摄 → 特征提取 → 匹配
+  │                               │── 匹配成功则更新数量
+  │◄── task_done ───────────────│
+  │    {result:"success",          │
+  │     is_match:true,             │
+  │     item_name:"扳手",           │
+  │     original_qty:50,           │
+  │     remove_qty:5,              │
+  │     remaining_qty:45}          │
+```
+
+**优势**：按需初始化硬件，节省资源；用户可在串口屏确认资产信息后再拍照验证。
 
 ---
 
@@ -287,6 +325,7 @@ main/
 
 ## 🔄 版本历史
 
+- **v3.4** (2026-06-05): ⭐ 架构重构 + GPIO 迁移（引入 business_executor 业务执行器，UART 处理器重构，GPIO17/18→47/21 解决摄像头冲突，outbound 分步控制，TX 诊断日志，step 动态化，补全 ping/sys_info/list_assets_page/get_asset 命令）
 - **v3.3** (2026-05-26): ⭐ 协议命令补全 + Tag ID 适配（delete/get_asset 改用 tag_id 字段，移除状态限制）
 - **v3.2** (2026-05-19): ⭐ Tag ID 改造（MAC地址→16位Tag ID，验证式数量累加，混合相似度验证）
 - **v3.1** (2026-05-10): L610 4G模块完整集成（MQTT云端通信、主动上报机制、AT重试、Payload保护、资源清理）
@@ -307,4 +346,4 @@ main/
 
 **许可证**: MIT  
 **维护者**: TcXc  
-**最后更新**: 2026-05-26
+**最后更新**: 2026-06-05

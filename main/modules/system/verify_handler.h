@@ -96,6 +96,11 @@ void verify_handler_reset(verify_context_t *ctx);
 bool verify_handler_is_active(const verify_context_t *ctx);
 
 /**
+ * @brief 全局验证上下文（由 verify_handler.c 定义，其他模块可通过此变量访问当前验证状态）
+ */
+extern verify_context_t g_verify_ctx;
+
+/**
  * @brief 获取是否达到最大重试次数
  * 
  * @param ctx 验证上下文

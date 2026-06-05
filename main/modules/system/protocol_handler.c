@@ -204,7 +204,7 @@ void protocol_handler_init(void)
     ESP_LOGI(TAG, "L610 manager send callback registered");
     
     // 创建WS63 UART接收任务
-    xTaskCreate(ws63_recv_task, "ws63_recv_task", 4096, NULL, 5, NULL);
+    xTaskCreate(ws63_recv_task, "ws63_recv_task", 8192, NULL, 5, NULL);
     
     ESP_LOGI(TAG, "WS63 protocol handler initialized");
 }
@@ -822,54 +822,46 @@ static esp_err_t ws63_handle_register(cJSON *json_obj)
         ESP_LOGI(TAG, "Detected verification mode (quantity-only register)");
     }
     
-    // ⭐ 解析 tag_id 字段（兼容旧 mac 字段）
-    const char *tag_id = NULL;
+    // ⭐ 解析 tag_id 字段（仅支持 tag_id，不再兼容 mac）
     cJSON *tag_id_item = cJSON_GetObjectItem(json_obj, "tag_id");
-    if (tag_id_item && cJSON_IsString(tag_id_item)) {
-        tag_id = tag_id_item->valuestring;
-        char temp_tag[TAG_ID_STR_LEN];
-        strncpy(temp_tag, tag_id, TAG_ID_STR_LEN - 1);
-        temp_tag[TAG_ID_STR_LEN - 1] = '\0';
-        tag_id_validator_normalize(temp_tag);
-        strncpy(g_ws63_tag_id, temp_tag, TAG_ID_STR_LEN - 1);
-        g_ws63_tag_id[TAG_ID_STR_LEN - 1] = '\0';
-        if (!tag_id_validator_validate(g_ws63_tag_id)) {
-            char error_buf[256];
-            protocol_generate_error_response(ERR_INVALID_TAG_ID, 
-                tag_id_validator_get_error_string(),
-                error_buf, sizeof(error_buf));
-            ws63_send_json_raw(error_buf);
-            return ESP_ERR_INVALID_ARG;
-        }
-        snprintf(g_ws63_mac, sizeof(g_ws63_mac), "%s", g_ws63_tag_id);
-    } else {
-        cJSON *mac_item_fallback = cJSON_GetObjectItem(json_obj, "mac");
-        if (!mac_item_fallback || !cJSON_IsString(mac_item_fallback)) {
-            char error_buf[256];
-            protocol_generate_error_response(ERR_MISSING_FIELD, 
-                "Missing 'tag_id' or 'mac' field", 
-                error_buf, sizeof(error_buf));
-            ws63_send_json_raw(error_buf);
-            return ESP_ERR_INVALID_ARG;
-        }
-        tag_id = mac_item_fallback->valuestring;
-        if (ws63_validate_mac(tag_id) != ESP_OK) {
-            char error_buf[256];
-            protocol_generate_error_response(ERR_INVALID_MAC, "Invalid MAC format", 
-                                            error_buf, sizeof(error_buf));
-            ws63_send_json_raw(error_buf);
-            return ESP_ERR_INVALID_ARG;
-        }
-        strncpy(g_ws63_mac, tag_id, sizeof(g_ws63_mac) - 1);
-        g_ws63_mac[sizeof(g_ws63_mac) - 1] = '\0';
+    if (!tag_id_item || !cJSON_IsString(tag_id_item)) {
+        char error_buf[256];
+        protocol_generate_error_response(ERR_MISSING_FIELD, 
+            "Missing 'tag_id' field", 
+            error_buf, sizeof(error_buf));
+        ws63_send_json_raw(error_buf);
+        return ESP_ERR_INVALID_ARG;
     }
+    const char *tag_id = tag_id_item->valuestring;
+    char temp_tag[TAG_ID_STR_LEN];
+    strncpy(temp_tag, tag_id, TAG_ID_STR_LEN - 1);
+    temp_tag[TAG_ID_STR_LEN - 1] = '\0';
+    tag_id_validator_normalize(temp_tag);
+    strncpy(g_ws63_tag_id, temp_tag, TAG_ID_STR_LEN - 1);
+    g_ws63_tag_id[TAG_ID_STR_LEN - 1] = '\0';
+    if (!tag_id_validator_validate(g_ws63_tag_id)) {
+        char error_buf[256];
+        protocol_generate_error_response(ERR_INVALID_TAG_ID, 
+            tag_id_validator_get_error_string(),
+            error_buf, sizeof(error_buf));
+        ws63_send_json_raw(error_buf);
+        return ESP_ERR_INVALID_ARG;
+    }
+    snprintf(g_ws63_mac, sizeof(g_ws63_mac), "%s", g_ws63_tag_id);
     
     // ⭐ 如果走验证式更新模式，检查资产是否存在
     if (is_verify_mode) {
-        asset_record_t existing;
-        esp_err_t asset_ret = asset_load(g_ws63_tag_id[0] ? g_ws63_tag_id : g_ws63_mac, &existing);
+        asset_record_t *existing = (asset_record_t *)calloc(1, sizeof(asset_record_t));
+        if (!existing) {
+            char error_buf[256];
+            protocol_generate_error_response(ERR_INTERNAL_ERROR, "Memory allocation failed",
+                                            error_buf, sizeof(error_buf));
+            ws63_send_json_raw(error_buf);
+            return ESP_ERR_NO_MEM;
+        }
+        esp_err_t asset_ret = asset_load(g_ws63_tag_id[0] ? g_ws63_tag_id : g_ws63_mac, existing);
         
-        if (asset_ret == ESP_OK && existing.is_valid) {
+        if (asset_ret == ESP_OK && existing->is_valid) {
             // ⭐ 资产存在→进入验证式更新流程
             int qty = quantity_only_item->valueint;
             if (qty <= 0) {
@@ -888,8 +880,8 @@ static esp_err_t ws63_handle_register(cJSON *json_obj)
             if (vmsg) {
                 cJSON_AddStringToObject(vmsg, "type", "verification_start");
                 cJSON_AddStringToObject(vmsg, "tag_id", g_ws63_tag_id);
-                cJSON_AddStringToObject(vmsg, "existing_item", existing.item_name);
-                cJSON_AddNumberToObject(vmsg, "current_qty", existing.quantity);
+                cJSON_AddStringToObject(vmsg, "existing_item", existing->item_name);
+                cJSON_AddNumberToObject(vmsg, "current_qty", existing->quantity);
                 cJSON_AddStringToObject(vmsg, "required_view", "front");
                 cJSON_AddStringToObject(vmsg, "message", "Please capture FRONT view for verification");
                 char *js = cJSON_PrintUnformatted(vmsg);
@@ -902,10 +894,10 @@ static esp_err_t ws63_handle_register(cJSON *json_obj)
             ws63_send_json_raw(verify_buf);
             
             // ⭐ 保存验证所需信息
-            strncpy(g_ws63_item_name, existing.item_name, sizeof(g_ws63_item_name) - 1);
-            g_ws63_storage_area = existing.storage_area;
+            strncpy(g_ws63_item_name, existing->item_name, sizeof(g_ws63_item_name) - 1);
+            g_ws63_storage_area = existing->storage_area;
             // 保存参考特征用于后续验证
-            memcpy(g_ws63_front_feature, existing.front_feature, sizeof(g_ws63_front_feature));
+            memcpy(g_ws63_front_feature, existing->front_feature, sizeof(g_ws63_front_feature));
             
             // 进入验证状态
             g_ws63_state = WS63_STATE_VERIFYING;
@@ -922,11 +914,12 @@ static esp_err_t ws63_handle_register(cJSON *json_obj)
             }
             
             ESP_LOGI(TAG, "Verification flow started for tag_id=%s, existing=%s, qty=%d",
-                     g_ws63_tag_id, existing.item_name, qty);
+                     g_ws63_tag_id, existing->item_name, qty);
             return ESP_OK;
         }
         // 资产不存在则回退到完整注册
         ESP_LOGW(TAG, "Asset not found for verification mode, falling back to full registration");
+        free(existing);
     }
     
     // ===== 完整注册流程（新资产或回退）=====
@@ -941,11 +934,16 @@ static esp_err_t ws63_handle_register(cJSON *json_obj)
     // ⭐ 前置检查：资产是否已存在（避免无意义的硬件初始化和拍摄流程）
     const char *check_id = g_ws63_tag_id[0] ? g_ws63_tag_id : g_ws63_mac;
     if (check_id && check_id[0] != '\0') {
-        asset_record_t existing_check;
-        esp_err_t check_ret = asset_load(check_id, &existing_check);
-        if (check_ret == ESP_OK && existing_check.is_valid) {
+        asset_record_t *existing_check = (asset_record_t *)calloc(1, sizeof(asset_record_t));
+        if (!existing_check) {
+            ESP_LOGE(TAG, "Memory allocation failed for existing_check");
+            return ESP_ERR_NO_MEM;
+        }
+        esp_err_t check_ret = asset_load(check_id, existing_check);
+        if (check_ret == ESP_OK && existing_check->is_valid) {
             if (!allow_overwrite) {
                 ESP_LOGW(TAG, "Asset %s already exists, overwrite NOT allowed (is_overwrite=false)", check_id);
+                free(existing_check);
                 // 构建协议一致的错误响应
                 cJSON *err = cJSON_CreateObject();
                 if (err) {
@@ -968,6 +966,7 @@ static esp_err_t ws63_handle_register(cJSON *json_obj)
             }
             ESP_LOGI(TAG, "Asset %s exists, overwrite allowed by WS63 (is_overwrite=true)", check_id);
         }
+        free(existing_check);
     }
     
     // 验证必填字段
@@ -1086,29 +1085,36 @@ static esp_err_t ws63_handle_inventory(cJSON *json_obj)
         return ESP_ERR_INVALID_STATE;
     }
     
-    // 验证必填字段
-    cJSON *mac_item = cJSON_GetObjectItem(json_obj, "mac");
-    if (!mac_item || !cJSON_IsString(mac_item)) {
+    // ⭐ 解析 tag_id 字段（仅支持 tag_id，不再兼容 mac）
+    cJSON *tag_id_item = cJSON_GetObjectItem(json_obj, "tag_id");
+    if (!tag_id_item || !cJSON_IsString(tag_id_item)) {
         char error_buf[256];
-        protocol_generate_error_response(ERR_MISSING_FIELD, "Missing 'mac' field", 
-                                        error_buf, sizeof(error_buf));
+        protocol_generate_error_response(ERR_MISSING_FIELD, 
+            "Missing 'tag_id' field", 
+            error_buf, sizeof(error_buf));
         ws63_send_json_raw(error_buf);
         return ESP_ERR_INVALID_ARG;
     }
-    
-    // 验证MAC地址格式
-    const char *mac = mac_item->valuestring;
-    if (ws63_validate_mac(mac) != ESP_OK) {
+    const char *tag_id = tag_id_item->valuestring;
+    char temp_tag[TAG_ID_STR_LEN];
+    strncpy(temp_tag, tag_id, TAG_ID_STR_LEN - 1);
+    temp_tag[TAG_ID_STR_LEN - 1] = '\0';
+    tag_id_validator_normalize(temp_tag);
+    strncpy(g_ws63_tag_id, temp_tag, TAG_ID_STR_LEN - 1);
+    g_ws63_tag_id[TAG_ID_STR_LEN - 1] = '\0';
+    if (!tag_id_validator_validate(g_ws63_tag_id)) {
         char error_buf[256];
-        protocol_generate_error_response(ERR_INVALID_MAC, "Invalid MAC address format", 
-                                        error_buf, sizeof(error_buf));
+        protocol_generate_error_response(ERR_INVALID_TAG_ID, 
+            tag_id_validator_get_error_string(),
+            error_buf, sizeof(error_buf));
         ws63_send_json_raw(error_buf);
         return ESP_ERR_INVALID_ARG;
     }
+    snprintf(g_ws63_mac, sizeof(g_ws63_mac), "%s", g_ws63_tag_id);
     
     // 检查资产是否存在
     asset_record_t ref_record;
-    esp_err_t ret = asset_load(mac, &ref_record);
+    esp_err_t ret = asset_load(g_ws63_tag_id[0] ? g_ws63_tag_id : g_ws63_mac, &ref_record);
     if (ret != ESP_OK) {
         char error_buf[256];
         protocol_generate_error_response(ERR_ASSET_NOT_FOUND, "Asset not found", 
@@ -1117,8 +1123,7 @@ static esp_err_t ws63_handle_inventory(cJSON *json_obj)
         return ESP_ERR_NOT_FOUND;
     }
     
-    // 保存参数到全局变量
-    strncpy(g_ws63_mac, mac, sizeof(g_ws63_mac) - 1);
+    // 保存参数到全局变量（tag_id 已在解析阶段写入 g_ws63_mac）
     strncpy(g_ws63_item_name, ref_record.item_name, sizeof(g_ws63_item_name) - 1);
     g_ws63_storage_area = ref_record.storage_area;
     g_ws63_quantity = ref_record.quantity;
@@ -1203,28 +1208,41 @@ static esp_err_t ws63_handle_outbound(cJSON *json_obj)
         return ESP_ERR_INVALID_STATE;
     }
     
-    // 验证必填字段
-    cJSON *mac_item = cJSON_GetObjectItem(json_obj, "mac");
+    // ⭐ 解析 tag_id 字段（仅支持 tag_id，不再兼容 mac）
     cJSON *remove_qty_item = cJSON_GetObjectItem(json_obj, "remove_qty");
-    
-    if (!mac_item || !cJSON_IsString(mac_item) ||
-        !remove_qty_item || !cJSON_IsNumber(remove_qty_item)) {
+    if (!remove_qty_item || !cJSON_IsNumber(remove_qty_item)) {
         char error_buf[256];
-        protocol_generate_error_response(ERR_MISSING_FIELD, "Missing required fields", 
+        protocol_generate_error_response(ERR_MISSING_FIELD, "Missing 'remove_qty' field", 
                                         error_buf, sizeof(error_buf));
         ws63_send_json_raw(error_buf);
         return ESP_ERR_INVALID_ARG;
     }
     
-    // 验证MAC地址格式
-    const char *mac = mac_item->valuestring;
-    if (ws63_validate_mac(mac) != ESP_OK) {
+    cJSON *tag_id_item = cJSON_GetObjectItem(json_obj, "tag_id");
+    if (!tag_id_item || !cJSON_IsString(tag_id_item)) {
         char error_buf[256];
-        protocol_generate_error_response(ERR_INVALID_MAC, "Invalid MAC address format", 
-                                        error_buf, sizeof(error_buf));
+        protocol_generate_error_response(ERR_MISSING_FIELD, 
+            "Missing 'tag_id' field", 
+            error_buf, sizeof(error_buf));
         ws63_send_json_raw(error_buf);
         return ESP_ERR_INVALID_ARG;
     }
+    const char *tag_id = tag_id_item->valuestring;
+    char temp_tag[TAG_ID_STR_LEN];
+    strncpy(temp_tag, tag_id, TAG_ID_STR_LEN - 1);
+    temp_tag[TAG_ID_STR_LEN - 1] = '\0';
+    tag_id_validator_normalize(temp_tag);
+    strncpy(g_ws63_tag_id, temp_tag, TAG_ID_STR_LEN - 1);
+    g_ws63_tag_id[TAG_ID_STR_LEN - 1] = '\0';
+    if (!tag_id_validator_validate(g_ws63_tag_id)) {
+        char error_buf[256];
+        protocol_generate_error_response(ERR_INVALID_TAG_ID, 
+            tag_id_validator_get_error_string(),
+            error_buf, sizeof(error_buf));
+        ws63_send_json_raw(error_buf);
+        return ESP_ERR_INVALID_ARG;
+    }
+    snprintf(g_ws63_mac, sizeof(g_ws63_mac), "%s", g_ws63_tag_id);
     
     // 验证出库数量
     int remove_qty = remove_qty_item->valueint;
@@ -1238,7 +1256,7 @@ static esp_err_t ws63_handle_outbound(cJSON *json_obj)
     
     // 检查资产是否存在
     asset_record_t ref_record;
-    esp_err_t ret = asset_load(mac, &ref_record);
+    esp_err_t ret = asset_load(g_ws63_tag_id[0] ? g_ws63_tag_id : g_ws63_mac, &ref_record);
     if (ret != ESP_OK) {
         char error_buf[256];
         protocol_generate_error_response(ERR_ASSET_NOT_FOUND, "Asset not found", 
@@ -1247,8 +1265,7 @@ static esp_err_t ws63_handle_outbound(cJSON *json_obj)
         return ESP_ERR_NOT_FOUND;
     }
     
-    // 保存参数到全局变量
-    strncpy(g_ws63_mac, mac, sizeof(g_ws63_mac) - 1);
+    // 保存参数到全局变量（tag_id 已在解析阶段写入 g_ws63_mac）
     strncpy(g_ws63_item_name, ref_record.item_name, sizeof(g_ws63_item_name) - 1);
     g_ws63_storage_area = ref_record.storage_area;
     g_ws63_quantity = ref_record.quantity;
@@ -2191,6 +2208,9 @@ void ws63_recv_task(void *pvParameters)
     }
     
     int line_pos = 0;
+    
+    // ⭐ 注册当前任务到 Task Watchdog，否则 esp_task_wdt_reset() 会报 "task not found"
+    esp_task_wdt_add(NULL);
     
     while (1) {
         int len = uart_read_bytes(WS63_UART_NUM, data, WS63_UART_BUF_SIZE, 

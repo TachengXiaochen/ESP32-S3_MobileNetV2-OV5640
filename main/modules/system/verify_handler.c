@@ -8,7 +8,6 @@
 
 static const char *TAG = "verify_handler";
 
-static verify_context_t g_verify_ctx;
 static bool g_initialized = false;
 
 /**

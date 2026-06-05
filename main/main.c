@@ -19,61 +19,46 @@
 #include "esp_task_wdt.h"
 #include "sdkconfig.h"
 
-// Modular interfaces
 #include "modules/camera/camera_module.h"
 #include "modules/system/storage_module.h"
 #include "modules/ai/ai_module.h"
 #include "modules/system/asset_manager.h"
-#include "modules/system/cmd_handler.h"
 #include "modules/system/led_indicator.h"
-#include "modules/system/verify_handler.h"  // 验证处理器
+#include "modules/system/verify_handler.h"
 #include "modules/ai/feature_processor.h"
-#include "modules/system/protocol_handler.h"
+#include "modules/system/business_executor.h"
+#include "modules/system/uart_handler_0.h"
+#include "modules/system/uart_handler_1.h"
 #include "modules/4g/l610_manager.h"
 #include "main.h"
 
-// ========== FreeRTOS 任务与队列定义 ==========
 #define UART_QUEUE_LEN    10
 #define STORAGE_QUEUE_LEN 5
 
-// UART 配置
 #define UART_NUM UART_NUM_0
 #define UART_BAUD_RATE 115200
 #define UART_BUF_SIZE (1024 * 2)
 
 static const char *TAG = "camera_ai";
-
-// 看门狗安全包装宏
 #define SAFE_WDT_RESET()    esp_task_wdt_reset()
 
-// ========== 全局变量定义（在 main.h 中声明为 extern）==========
-
-// 全局队列句柄
 QueueHandle_t xSystemQueue = NULL;
 QueueHandle_t xStorageQueue = NULL;
 QueueHandle_t xInferenceQueue = NULL;
 SemaphoreHandle_t xCameraMutex = NULL;
 
-// Global state variables
 bool g_camera_ready = false;
 bool g_storage_ready = false;
-
-// Shared state for multi-view capture
 float g_front_feature[FEATURE_VEC_SIZE] = {0};
 float g_side_feature[FEATURE_VEC_SIZE] = {0};
 float g_top_feature[FEATURE_VEC_SIZE] = {0};
-
-// 盘点模式状态
 inventory_state_t g_inventory_state = INVENTORY_IDLE;
-
-// 推理任务进度计数器
 int g_views_enqueued = 0;
 int g_views_processed = 0;
 int g_total_views = 0;
-
 char g_current_tag_id[TAG_ID_STR_LEN] = {0};
 camera_state_t g_camera_state = CAM_STATE_WAITING_TAG_ID;
-view_state_t g_view_state = VIEW_NONE;
+view_state_t g_view_state = BE_VIEW_NONE;
 bool g_camera_power_on = false;
 bool g_storage_initialized = false;
 bool g_is_inventory_mode = false;
@@ -83,11 +68,9 @@ char g_reg_storage_area = 'A';
 uint32_t g_reg_quantity = 0;
 uint32_t g_outbound_quantity = 0;
 uint32_t g_outbound_original_qty = 0;
-
-// 验证上下文（用于验证式更新流程）
 verify_context_t g_verify_ctx = {0};
+char g_l610_client_id[64] = {0};
 
-// ========== 内部辅助函数（前向声明）==========
 static void system_shutdown_camera(void);
 static void handle_capture_view(system_msg_t *msg);
 static void handle_save_asset(system_msg_t *msg);
@@ -96,640 +79,264 @@ static void handle_outbound_analyze(system_msg_t *msg);
 static void handle_outbound_update_qty(system_msg_t *msg);
 static void handle_inference_trigger(system_msg_t *msg);
 
-// ========== UART 初始化 ==========
 static void init_uart(void)
 {
     uart_config_t uart_config = {
-        .baud_rate = UART_BAUD_RATE,
-        .data_bits = UART_DATA_8_BITS,
-        .parity = UART_PARITY_DISABLE,
-        .stop_bits = UART_STOP_BITS_1,
+        .baud_rate = UART_BAUD_RATE, .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE, .stop_bits = UART_STOP_BITS_1,
         .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
     };
-    
     uart_param_config(UART_NUM, &uart_config);
     uart_set_pin(UART_NUM, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
     uart_driver_install(UART_NUM, UART_BUF_SIZE, 0, 0, NULL, 0);
-    
     ESP_LOGI(TAG, "UART initialized at %d baud", UART_BAUD_RATE);
 }
 
-// ========== 系统信息打印 ==========
 void print_system_info_uart(void)
 {
     char info_buf[512];
-    
     const uint32_t free_heap = esp_get_free_heap_size();
     const uint32_t min_free_heap = esp_get_minimum_free_heap_size();
-    
     snprintf(info_buf, sizeof(info_buf),
-             "\r\n========== SYSTEM INFORMATION ==========\r\n"
-             "  Chip Model:     ESP32-S3\r\n"
-             "  CPU Cores:      2\r\n"
-             "  Free Heap:      %lu bytes\r\n"
-             "  Min Free Heap:  %lu bytes\r\n"
-             "  Camera State:   %s\r\n"
-             "  Storage State:  %s\r\n"
-             "  Current Tag ID: %s\r\n"
-             "  Mode:           %s\r\n"
-             "===========================================\r\n",
-             (unsigned long)free_heap,
-             (unsigned long)min_free_heap,
-             g_camera_ready ? "READY" : "NOT READY",
-             g_storage_ready ? "READY" : "NOT READY",
-             strlen(g_current_tag_id) > 0 ? g_current_tag_id : "N/A",
-             g_is_inventory_mode ? "INVENTORY" : "REGISTRATION");
-    
-    uart_write_bytes(UART_NUM, (const char *)info_buf, strlen(info_buf));
+             "\r\n========== SYSTEM INFO ==========\r\n"
+             "  Free Heap: %lu  Min Free: %lu\r\n"
+             "  Camera: %s  Storage: %s\r\n"
+             "  Tag: %s  Mode: %s\r\n"
+             "==================================\r\n",
+             (unsigned long)free_heap, (unsigned long)min_free_heap,
+             g_camera_ready ? "OK" : "NO", g_storage_ready ? "OK" : "NO",
+             strlen(g_current_tag_id) ? g_current_tag_id : "N/A",
+             g_is_inventory_mode ? "INV" : "REG");
+    uart_write_bytes(UART_NUM, info_buf, strlen(info_buf));
 }
 
-// ========== 统一摄像头关闭清理（消除5处重复代码）==========
 static void system_shutdown_camera(void)
 {
     led_camera_off();
     g_camera_power_on = false;
-    camera_module_deinit();
+    system_msg_t deinit_msg = { .cmd = CMD_DEINIT_CAMERA };
+    xQueueSend(xSystemQueue, &deinit_msg, pdMS_TO_TICKS(500));
     g_camera_state = CAM_STATE_WAITING_TAG_ID;
-    g_view_state = VIEW_NONE;
+    g_view_state = BE_VIEW_NONE;
     g_inventory_state = INVENTORY_IDLE;
     g_is_inventory_mode = false;
     g_is_outbound_mode = false;
     show_main_menu();
 }
 
-// ========== CMD_CAPTURE_FRONT / SIDE / TOP 处理 ==========
 static void handle_capture_view(system_msg_t *msg)
 {
-    if (!g_camera_ready) {
-        uart_write_bytes(UART_NUM, (const char *)"Camera not ready!\r\n", 20);
-        return;
-    }
-    
-    const char *view_name = NULL;
-    const char *view_label = NULL;
-    
-    if (msg->cmd == CMD_CAPTURE_FRONT) {
-        view_name = "Front";
-        view_label = "front";
-        led_capture_front(g_is_inventory_mode);
-    } else if (msg->cmd == CMD_CAPTURE_SIDE) {
-        view_name = "Side";
-        view_label = "side";
-        led_capture_side(g_is_inventory_mode);
-    } else {
-        view_name = "Top";
-        view_label = "top";
-        led_capture_top(g_is_inventory_mode);
-    }
-    
+    if (!g_camera_ready) { uart_write_bytes(UART_NUM, "Camera not ready!\r\n", 20); return; }
+    const char *view_name = NULL, *view_label = NULL;
+    if (msg->cmd == CMD_CAPTURE_FRONT) { view_name = "Front"; view_label = "front"; led_capture_front(g_is_inventory_mode); }
+    else if (msg->cmd == CMD_CAPTURE_SIDE) { view_name = "Side"; view_label = "side"; led_capture_side(g_is_inventory_mode); }
+    else { view_name = "Top"; view_label = "top"; led_capture_top(g_is_inventory_mode); }
     esp_task_wdt_reset();
-    
-    // 拍摄线程只负责 JPEG 捕获+保存（~200ms），推理交给 inference_task
     bool image_saved = false;
-    
     if ((!g_is_inventory_mode || g_is_outbound_mode) && g_storage_ready) {
         if (xSemaphoreTake(xCameraMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
-            uint8_t *jpeg_buf = NULL;
-            size_t jpeg_len = 0;
+            uint8_t *jpeg_buf = NULL; size_t jpeg_len = 0;
             if (camera_module_capture_jpeg(&jpeg_buf, &jpeg_len)) {
-                ESP_LOGI(TAG, "Captured JPEG image: %u bytes", (unsigned int)jpeg_len);
+                ESP_LOGI(TAG, "JPEG %u bytes", (unsigned)jpeg_len);
                 esp_err_t ret = storage_module_save_image(g_current_tag_id, view_label, jpeg_buf, jpeg_len);
-                if (ret == ESP_OK) {
-                    image_saved = true;
-                    ESP_LOGI(TAG, "Image saved successfully");
-                } else {
-                    ESP_LOGW(TAG, "Failed to save image (err=0x%x)", ret);
-                }
+                if (ret == ESP_OK) image_saved = true;
+                else ESP_LOGW(TAG, "Save image fail 0x%x", ret);
                 free(jpeg_buf);
-            } else {
-                ESP_LOGW(TAG, "Failed to capture JPEG image");
-            }
+            } else ESP_LOGW(TAG, "JPEG capture fail");
             xSemaphoreGive(xCameraMutex);
-        } else {
-            ESP_LOGW(TAG, "Camera mutex timeout for JPEG capture");
-        }
+        } else ESP_LOGW(TAG, "Mutex timeout JPEG");
     }
-    
-    // 将推理任务入队到 inference_task（后台异步处理）
-    inference_job_t job;
-    memset(&job, 0, sizeof(job));
-    job.view_cmd = msg->cmd;
-    snprintf(job.tag_id, sizeof(job.tag_id), "%s", g_current_tag_id);
-    job.expected_views = g_total_views;
-    job.is_registration = !g_is_inventory_mode && !g_is_outbound_mode;
+    inference_job_t job; memset(&job, 0, sizeof(job));
+    job.view_cmd = msg->cmd; snprintf(job.tag_id, sizeof(job.tag_id), "%s", g_current_tag_id);
+    job.expected_views = g_total_views; job.is_registration = !g_is_inventory_mode && !g_is_outbound_mode;
     job.must_save_jpeg = !g_is_inventory_mode;
-    
-    if (xQueueSend(xInferenceQueue, &job, pdMS_TO_TICKS(100))) {
-        g_views_enqueued++;
-        ESP_LOGI(TAG, "Inference job enqueued for %s view (%d/%d)",
-                 view_name, g_views_enqueued, g_total_views);
-    } else {
-        ESP_LOGW(TAG, "Inference queue full, dropping %s view", view_name);
-    }
-    
-    // 立即反馈拍摄成功
-    char log_msg[128];
-    if (image_saved) {
-        snprintf(log_msg, sizeof(log_msg), "%s view captured (with image)\r\n", view_name);
-    } else {
-        snprintf(log_msg, sizeof(log_msg), "%s view captured (feature pending)\r\n", view_name);
-    }
-    uart_write_bytes(UART_NUM, (const char *)log_msg, strlen(log_msg));
-    
+    if (xQueueSend(xInferenceQueue, &job, pdMS_TO_TICKS(100))) { g_views_enqueued++; ESP_LOGI(TAG, "Inference enqueued %s %d/%d", view_name, g_views_enqueued, g_total_views); }
+    else ESP_LOGW(TAG, "Inference queue full drop %s", view_name);
+    char lm[128]; snprintf(lm, sizeof(lm), "%s view captured%s\r\n", view_name, image_saved ? " (img)" : "");
+    uart_write_bytes(UART_NUM, lm, strlen(lm));
     esp_task_wdt_reset();
-    
-    // 更新视图状态并显示下一步引导
     if (msg->cmd == CMD_CAPTURE_FRONT) {
-        g_view_state = VIEW_FRONT;
-        if (g_inventory_state == INVENTORY_IDLE) {
-            g_inventory_state = INVENTORY_WAITING_SIDE;
-            show_registration_step2();
-        } else if (g_inventory_state == INVENTORY_WAITING_FRONT) {
-            g_inventory_state = INVENTORY_WAITING_SIDE;
-            show_inventory_step2();
-        }
+        g_view_state = BE_VIEW_FRONT;
+        if (g_inventory_state == INVENTORY_IDLE) { g_inventory_state = INVENTORY_WAITING_SIDE; show_registration_step2(); }
+        else if (g_inventory_state == INVENTORY_WAITING_FRONT) { g_inventory_state = INVENTORY_WAITING_SIDE; show_inventory_step2(); }
     } else if (msg->cmd == CMD_CAPTURE_SIDE) {
-        g_view_state = VIEW_SIDE;
-        if (g_inventory_state == INVENTORY_WAITING_SIDE) {
-            g_inventory_state = INVENTORY_WAITING_TOP;
-            show_registration_step3();
-        }
-    } else {
-        g_view_state = VIEW_TOP;
-    }
+        g_view_state = BE_VIEW_SIDE;
+        if (g_inventory_state == INVENTORY_WAITING_SIDE) { g_inventory_state = INVENTORY_WAITING_TOP; show_registration_step3(); }
+    } else g_view_state = BE_VIEW_TOP;
+    int vi = (msg->cmd == CMD_CAPTURE_FRONT) ? 0 : (msg->cmd == CMD_CAPTURE_SIDE) ? 1 : 2;
+    be_on_view_captured(vi);
 }
 
-// ========== CMD_SAVE_ASSET 处理 ==========
 static void handle_save_asset(system_msg_t *msg)
 {
-    if (!g_storage_ready || !msg->data) {
-        return;
-    }
-    
-    ESP_LOGI(TAG, "Storage task: Saving asset for Tag ID: %s", msg->tag_id);
-    save_result_t result = storage_module_save_asset((asset_record_t *)msg->data);
-    
+    if (!g_storage_ready || !msg->data) return;
+    ESP_LOGI(TAG, "Save asset %s", msg->tag_id);
+    save_result_t result = storage_module_save_asset((asset_record_t*)msg->data);
     if (result != SAVE_RESULT_FAILED) {
-        uart_write_bytes(UART_NUM, (const char *)"\r\n✅ REGISTRATION COMPLETE!\r\n", 30);
-        
-        if (result == SAVE_RESULT_SUCCESS_OVERWRITE) {
-            uart_write_bytes(UART_NUM, (const char *)"  Asset UPDATED (overwritten) on SD card.\r\n", 44);
-        } else {
-            uart_write_bytes(UART_NUM, (const char *)"  Asset saved to SD card successfully.\r\n", 41);
-        }
-        
-        char tag_id_msg[64];
-        snprintf(tag_id_msg, sizeof(tag_id_msg), "  Tag ID: %s\r\n", msg->tag_id);
-        uart_write_bytes(UART_NUM, (const char *)tag_id_msg, strlen(tag_id_msg));
-        uart_write_bytes(UART_NUM, (const char *)"  Camera: POWER OFF\r\n\r\n", 25);
-        
-        free(msg->data);
-        system_shutdown_camera();
-    } else {
-        uart_write_bytes(UART_NUM, (const char *)"\r\n❌ FAILED TO SAVE ASSET\r\n", 28);
-        uart_write_bytes(UART_NUM, (const char *)"  Please check SD card and try again.\r\n\r\n", 42);
-    }
+        uart_write_bytes(UART_NUM, "\r\nREGISTRATION COMPLETE!\r\n", 26);
+        uart_write_bytes(UART_NUM, "  Asset saved.\r\n", 18);
+        char buf[64]; snprintf(buf, sizeof(buf), "  Tag ID: %s\r\n", msg->tag_id);
+        uart_write_bytes(UART_NUM, buf, strlen(buf));
+        uart_write_bytes(UART_NUM, "  Camera: POWER OFF\r\n\r\n", 25);
+        free(msg->data); system_shutdown_camera();
+    } else { uart_write_bytes(UART_NUM, "\r\nFAILED TO SAVE\r\n", 19); }
 }
 
-// ========== CMD_START_INVENTORY 处理 ==========
 static void handle_inventory_analysis(system_msg_t *msg)
 {
-    ESP_LOGI(TAG, "Starting inventory analysis for Tag ID: %s", msg->tag_id);
-    
-    asset_record_t *ref_record = (asset_record_t *)malloc(sizeof(asset_record_t));
-    if (!ref_record) {
-        uart_write_bytes(UART_NUM, (const char *)"Memory allocation failed!\r\n", 28);
-        return;
-    }
-    
-    esp_err_t ret = asset_load(msg->tag_id, ref_record);
-    if (ret != ESP_OK) {
-        uart_write_bytes(UART_NUM, (const char *)"Failed to load reference asset!\r\n", 34);
-        free(ref_record);
-        return;
-    }
-    
-    similarity_result_t front_result = {0};
-    similarity_result_t side_result = {0};
-    similarity_result_t top_result = {0};
-    
-    ai_module_match_features(g_front_feature, ref_record->front_feature, FEATURE_VEC_SIZE,
-                             ASSET_CLASS_UNKNOWN, &front_result);
-    ai_module_match_features(g_side_feature, ref_record->side_feature, FEATURE_VEC_SIZE,
-                             ASSET_CLASS_UNKNOWN, &side_result);
-    ai_module_match_features(g_top_feature, ref_record->top_feature, FEATURE_VEC_SIZE,
-                             ASSET_CLASS_UNKNOWN, &top_result);
-    
-    float weighted_conf = front_result.confidence * 0.5f +
-                          side_result.confidence * 0.3f +
-                          top_result.confidence * 0.2f;
-    
-    const float MATCH_THRESHOLD = front_result.match_threshold;
-    const char *match_result;
-    const char *match_symbol;
-    
-    if (weighted_conf >= MATCH_THRESHOLD) {
-        match_result = "MATCH - Same Asset";
-        match_symbol = "✅";
-    } else {
-        match_result = "NO MATCH - Different Asset";
-        match_symbol = "❌";
-    }
-    
-    char result_msg[768];
-    snprintf(result_msg, sizeof(result_msg),
-             "\r\n========== INVENTORY RESULT (OPTIMIZED) ==========\r\n"
-             "  [FRONT VIEW]\r\n"
-             "    Cosine:      %.4f\r\n"
-             "    Euclidean:   %.4f\r\n"
-             "    Mixed:       %.4f\r\n"
-             "    Confidence:  %.4f (×0.5)\r\n"
-             "  [SIDE VIEW]\r\n"
-             "    Cosine:      %.4f\r\n"
-             "    Euclidean:   %.4f\r\n"
-             "    Mixed:       %.4f\r\n"
-             "    Confidence:  %.4f (×0.3)\r\n"
-             "  [TOP VIEW]\r\n"
-             "    Cosine:      %.4f\r\n"
-             "    Euclidean:   %.4f\r\n"
-             "    Mixed:       %.4f\r\n"
-             "    Confidence:  %.4f (×0.2)\r\n"
-             "  ------------------------------------------------\r\n"
-             "  Weighted Confidence: %.4f\r\n"
-             "  Dynamic Threshold:   %.2f\r\n"
-             "  %s %s\r\n"
-             "  Tag ID: %s\r\n"
-             "  Camera: POWER OFF\r\n"
-             "===================================================\r\n",
-             front_result.cosine_similarity, front_result.euclidean_similarity,
-             front_result.mixed_similarity, front_result.confidence,
-             side_result.cosine_similarity, side_result.euclidean_similarity,
-             side_result.mixed_similarity, side_result.confidence,
-             top_result.cosine_similarity, top_result.euclidean_similarity,
-             top_result.mixed_similarity, top_result.confidence,
-             weighted_conf, MATCH_THRESHOLD, match_symbol, match_result, msg->tag_id);
-    uart_write_bytes(UART_NUM, (const char *)result_msg, strlen(result_msg));
-    
-    free(ref_record);
-    system_shutdown_camera();
+    ESP_LOGI(TAG, "Inventory analysis for %s", msg->tag_id);
+    asset_record_t *r = (asset_record_t*)malloc(sizeof(asset_record_t));
+    if (!r) return;
+    if (asset_load(msg->tag_id, r) != ESP_OK) { free(r); return; }
+    similarity_result_t fr = {0}, sr = {0}, tr = {0};
+    ai_module_match_features(g_front_feature, r->front_feature, FEATURE_VEC_SIZE, ASSET_CLASS_UNKNOWN, &fr);
+    ai_module_match_features(g_side_feature, r->side_feature, FEATURE_VEC_SIZE, ASSET_CLASS_UNKNOWN, &sr);
+    ai_module_match_features(g_top_feature, r->top_feature, FEATURE_VEC_SIZE, ASSET_CLASS_UNKNOWN, &tr);
+    float wc = fr.confidence*0.5f + sr.confidence*0.3f + tr.confidence*0.2f;
+    char buf[512]; snprintf(buf, sizeof(buf),
+        "\r\nINVENTORY: w=%.4f th=%.2f %s\r\n", wc, fr.match_threshold,
+        (wc >= fr.match_threshold) ? "MATCH" : "NO MATCH");
+    uart_write_bytes(UART_NUM, buf, strlen(buf));
+    free(r); system_shutdown_camera();
 }
 
-// ========== CMD_OUTBOUND_ANALYZE 处理 ==========
 static void handle_outbound_analyze(system_msg_t *msg)
 {
-    ESP_LOGI(TAG, "Starting outbound analysis for Tag ID: %s", msg->tag_id);
-    
-    asset_record_t *ref_record = (asset_record_t *)malloc(sizeof(asset_record_t));
-    if (!ref_record) {
-        uart_write_bytes(UART_NUM, (const char *)"Memory allocation failed!\r\n", 28);
-        return;
-    }
-    
-    esp_err_t ret = asset_load(msg->tag_id, ref_record);
-    if (ret != ESP_OK) {
-        uart_write_bytes(UART_NUM, (const char *)"Failed to load reference asset!\r\n", 34);
-        free(ref_record);
-        return;
-    }
-    
-    g_outbound_original_qty = ref_record->quantity;
-    
-    similarity_result_t out_result = {0};
-    ai_module_match_features(g_front_feature, ref_record->front_feature, FEATURE_VEC_SIZE,
-                             ASSET_CLASS_UNKNOWN, &out_result);
-    
-    const float MATCH_THRESHOLD = out_result.match_threshold;
-    const char *match_symbol;
-    const char *match_result_str;
-    bool is_match = (out_result.confidence >= MATCH_THRESHOLD);
-    
-    if (is_match) {
-        match_symbol = "✅";
-        match_result_str = "MATCH - Same Asset";
-    } else {
-        match_symbol = "❌";
-        match_result_str = "NO MATCH - Different Asset";
-    }
-    
-    char result_msg[640];
-    snprintf(result_msg, sizeof(result_msg),
-             "\r\n========== OUTBOUND RESULT ==========\r\n"
-             "  [FRONT VIEW]\r\n"
-             "    Cosine:      %.4f\r\n"
-             "    Euclidean:   %.4f\r\n"
-             "    Mixed:       %.4f\r\n"
-             "    Confidence:  %.4f\r\n"
-             "  ----------------------------------------\r\n"
-             "  Threshold:    %.2f\r\n"
-             "  %s %s\r\n"
-             "  Tag ID: %s\r\n"
-             "  Original Qty: %lu\r\n"
-             "  Remove Qty:   %lu\r\n"
-             "=========================================\r\n",
-             out_result.cosine_similarity, out_result.euclidean_similarity,
-             out_result.mixed_similarity, out_result.confidence,
-             MATCH_THRESHOLD, match_symbol, match_result_str, msg->tag_id,
-             (unsigned long)g_outbound_original_qty,
-             (unsigned long)g_outbound_quantity);
-    uart_write_bytes(UART_NUM, (const char *)result_msg, strlen(result_msg));
-    
-    if (is_match) {
-        system_msg_t update_msg = {0};
-        update_msg.cmd = CMD_OUTBOUND_UPDATE_QTY;
-        snprintf(update_msg.tag_id, sizeof(update_msg.tag_id), "%s", msg->tag_id);
-        xQueueSend(xSystemQueue, &update_msg, portMAX_DELAY);
-    } else {
-        uart_write_bytes(UART_NUM, (const char *)"\r\n⚠️  OUTBOUND FAILED: Face mismatch!\r\n", 40);
-        uart_write_bytes(UART_NUM, (const char *)"  Asset quantity NOT updated.\r\n", 30);
-        system_shutdown_camera();
-    }
-    
-    free(ref_record);
+    ESP_LOGI(TAG, "Outbound analyze %s", msg->tag_id);
+    asset_record_t *r = (asset_record_t*)malloc(sizeof(asset_record_t));
+    if (!r) return;
+    if (asset_load(msg->tag_id, r) != ESP_OK) { free(r); return; }
+    g_outbound_original_qty = r->quantity;
+    similarity_result_t o = {0};
+    ai_module_match_features(g_front_feature, r->front_feature, FEATURE_VEC_SIZE, ASSET_CLASS_UNKNOWN, &o);
+    if (o.confidence >= o.match_threshold) {
+        system_msg_t um = {0}; um.cmd = CMD_OUTBOUND_UPDATE_QTY;
+        snprintf(um.tag_id, sizeof(um.tag_id), "%s", msg->tag_id);
+        xQueueSend(xSystemQueue, &um, portMAX_DELAY);
+    } else { uart_write_bytes(UART_NUM, "\r\nOUTBOUND FAILED\r\n", 20); system_shutdown_camera(); }
+    free(r);
 }
 
-// ========== CMD_OUTBOUND_UPDATE_QTY 处理 ==========
 static void handle_outbound_update_qty(system_msg_t *msg)
 {
-    ESP_LOGI(TAG, "Updating quantity for outbound: Tag ID=%s, remove=%lu, original=%lu",
-             msg->tag_id, (unsigned long)g_outbound_quantity, (unsigned long)g_outbound_original_qty);
-    
-    asset_record_t *update_record = (asset_record_t *)malloc(sizeof(asset_record_t));
-    if (!update_record) {
-        uart_write_bytes(UART_NUM, (const char *)"Memory allocation failed!\r\n", 28);
-        return;
-    }
-    
-    esp_err_t ret = asset_load(msg->tag_id, update_record);
-    if (ret != ESP_OK) {
-        uart_write_bytes(UART_NUM, (const char *)"Failed to load asset for update!\r\n", 35);
-        free(update_record);
-        return;
-    }
-    
-    if (g_outbound_quantity >= update_record->quantity) {
-        update_record->quantity = 0;
-    } else {
-        update_record->quantity -= g_outbound_quantity;
-    }
-    
-    bool is_overwrite = false;
-    if (update_record->quantity == 0) {
-        asset_delete(msg->tag_id);
-        uart_write_bytes(UART_NUM, (const char *)"\r\n✅ OUTBOUND COMPLETE!\r\n", 22);
-        char qty_msg[96];
-        snprintf(qty_msg, sizeof(qty_msg),
-                 "  Removed: %lu (All stock depleted, asset deleted)\r\n",
-                 (unsigned long)g_outbound_quantity);
-        uart_write_bytes(UART_NUM, (const char *)qty_msg, strlen(qty_msg));
-    } else {
-        esp_err_t save_ret = asset_save(update_record, &is_overwrite);
-        if (save_ret == ESP_OK) {
-            uart_write_bytes(UART_NUM, (const char *)"\r\n✅ OUTBOUND COMPLETE!\r\n", 22);
-            char qty_msg[128];
-            snprintf(qty_msg, sizeof(qty_msg),
-                     "  Removed: %lu | Remaining: %lu\r\n",
-                     (unsigned long)g_outbound_quantity,
-                     (unsigned long)update_record->quantity);
-            uart_write_bytes(UART_NUM, (const char *)qty_msg, strlen(qty_msg));
-        } else {
-            uart_write_bytes(UART_NUM, (const char *)"\r\n❌ FAILED TO UPDATE QUANTITY\r\n", 32);
-        }
-    }
-    
-    char tag_id_msg[64];
-    snprintf(tag_id_msg, sizeof(tag_id_msg), "  Tag ID: %s\r\n", msg->tag_id);
-    uart_write_bytes(UART_NUM, (const char *)tag_id_msg, strlen(tag_id_msg));
-    uart_write_bytes(UART_NUM, (const char *)"  Original image saved.\r\n", 25);
-    uart_write_bytes(UART_NUM, (const char *)"  Camera: POWER OFF\r\n\r\n", 25);
-    
-    free(update_record);
-    system_shutdown_camera();
+    ESP_LOGI(TAG, "Update qty %s", msg->tag_id);
+    asset_record_t *u = (asset_record_t*)malloc(sizeof(asset_record_t));
+    if (!u) return;
+    if (asset_load(msg->tag_id, u) != ESP_OK) { free(u); return; }
+    if (g_outbound_quantity >= u->quantity) u->quantity = 0; else u->quantity -= g_outbound_quantity;
+    bool ow = false;
+    if (u->quantity == 0) { asset_delete(msg->tag_id); uart_write_bytes(UART_NUM, "\r\nOUTBOUND DONE\r\n", 17); }
+    else { asset_save(u, &ow); uart_write_bytes(UART_NUM, "\r\nOUTBOUND DONE\r\n", 17); }
+    uart_write_bytes(UART_NUM, "  Camera: POWER OFF\r\n\r\n", 25);
+    free(u); system_shutdown_camera();
 }
 
-// ========== CMD_INFERENCE_TRIGGER 处理 ==========
 static void handle_inference_trigger(system_msg_t *msg)
 {
-    ESP_LOGI(TAG, "All views inference completed, triggering final operation");
-    ESP_LOGI(TAG, "Mode: %s (g_is_inventory_mode=%d, g_is_outbound_mode=%d)",
-             g_is_inventory_mode ? "INVENTORY" : (g_is_outbound_mode ? "OUTBOUND" : "REGISTRATION"),
-             g_is_inventory_mode, g_is_outbound_mode);
-    
+    bool be_handled = be_on_all_views_done();
+    ESP_LOGI(TAG, "All views done");
+    if (be_handled) return;  // business_executor 已处理，跳过旧 CLI 路径
     if (g_is_outbound_mode) {
         g_inventory_state = INVENTORY_COMPLETE;
-        system_msg_t analyze_msg = {0};
-        analyze_msg.cmd = CMD_OUTBOUND_ANALYZE;
-        snprintf(analyze_msg.tag_id, sizeof(analyze_msg.tag_id), "%s", g_current_tag_id);
-        xQueueSend(xSystemQueue, &analyze_msg, portMAX_DELAY);
+        system_msg_t am = {0}; am.cmd = CMD_OUTBOUND_ANALYZE;
+        snprintf(am.tag_id, sizeof(am.tag_id), "%s", g_current_tag_id);
+        xQueueSend(xSystemQueue, &am, portMAX_DELAY);
     } else if (g_is_inventory_mode) {
         g_inventory_state = INVENTORY_ANALYZING;
-        system_msg_t analyze_msg = {0};
-        analyze_msg.cmd = CMD_START_INVENTORY;
-        snprintf(analyze_msg.tag_id, sizeof(analyze_msg.tag_id), "%s", g_current_tag_id);
-        ESP_LOGI(TAG, "Sending CMD_START_INVENTORY to queue...");
-        xQueueSend(xSystemQueue, &analyze_msg, portMAX_DELAY);
-        ESP_LOGI(TAG, "CMD_START_INVENTORY sent successfully");
+        system_msg_t am = {0}; am.cmd = CMD_START_INVENTORY;
+        snprintf(am.tag_id, sizeof(am.tag_id), "%s", g_current_tag_id);
+        xQueueSend(xSystemQueue, &am, portMAX_DELAY);
     } else {
         g_inventory_state = INVENTORY_COMPLETE;
-        
-        system_msg_t save_msg = {0};
-        save_msg.cmd = CMD_SAVE_ASSET;
-        
-        asset_record_t *record = (asset_record_t *)malloc(sizeof(asset_record_t));
-        if (record) {
-            snprintf(record->tag_id, sizeof(record->tag_id), "%s", g_current_tag_id);
-            snprintf(record->item_name, sizeof(record->item_name), "%s", g_reg_item_name);
-            record->storage_area = g_reg_storage_area;
-            record->quantity = g_reg_quantity;
-            memcpy(record->front_feature, g_front_feature, sizeof(g_front_feature));
-            memcpy(record->side_feature, g_side_feature, sizeof(g_side_feature));
-            memcpy(record->top_feature, g_top_feature, sizeof(g_top_feature));
-            record->is_valid = true;
-            save_msg.data = record;
-            xQueueSend(xSystemQueue, &save_msg, portMAX_DELAY);
-        } else {
-            uart_write_bytes(UART_NUM, (const char *)"Memory allocation failed!\r\n", 28);
+        system_msg_t sm = {0}; sm.cmd = CMD_SAVE_ASSET;
+        asset_record_t *rec = (asset_record_t*)malloc(sizeof(asset_record_t));
+        if (rec) {
+            snprintf(rec->tag_id, sizeof(rec->tag_id), "%s", g_current_tag_id);
+            snprintf(rec->item_name, sizeof(rec->item_name), "%s", g_reg_item_name);
+            rec->storage_area = g_reg_storage_area; rec->quantity = g_reg_quantity;
+            memcpy(rec->front_feature, g_front_feature, sizeof(g_front_feature));
+            memcpy(rec->side_feature, g_side_feature, sizeof(g_side_feature));
+            memcpy(rec->top_feature, g_top_feature, sizeof(g_top_feature));
+            rec->is_valid = true; sm.data = rec;
+            xQueueSend(xSystemQueue, &sm, portMAX_DELAY);
         }
     }
 }
 
-// ========== UART 接收任务 ==========
-static void uart_task(void *pvParameters)
-{
-    esp_task_wdt_add(NULL);
-    
-    uint8_t *data = (uint8_t *) malloc(UART_BUF_SIZE);
-    char line_buf[128] = {0};
-    int line_pos = 0;
-    
-    while (1) {
-        int len = uart_read_bytes(UART_NUM, data, UART_BUF_SIZE, 100 / portTICK_PERIOD_MS);
-        if (len > 0) {
-            for (int i = 0; i < len; i++) {
-                uint8_t ch = data[i];
-                
-                if (ch == '\r' || ch == '\n') {
-                    if (line_pos > 0) {
-                        line_buf[line_pos] = '\0';
-                        ESP_LOGI(TAG, "Received command: %s", line_buf);
-                        cmd_handler_process(line_buf);
-                        line_pos = 0;
-                        memset(line_buf, 0, sizeof(line_buf));
-                    }
-                } else {
-                    if (line_pos < sizeof(line_buf) - 1) {
-                        line_buf[line_pos++] = ch;
-                    }
-                }
-            }
-        }
-        
-        esp_task_wdt_reset();
-    }
-}
-
-// ========== 摄像头AI主任务（精简版—仅消息分发）==========
+// ========== 摄像头AI主任务 ==========
 static void camera_ai_task(void *pvParameters)
 {
+    printf("[DIAG] AI TASK STARTED\n");
     esp_task_wdt_add(NULL);
-    
     system_msg_t msg;
-    
     while (1) {
         if (xQueueReceive(xSystemQueue, &msg, pdMS_TO_TICKS(2000))) {
             SAFE_WDT_RESET();
-            
-            switch (msg.cmd) {
-                case CMD_INIT_CAMERA:
-                    if (camera_module_init()) {
-                        g_camera_ready = true;
-                        g_camera_power_on = true;
-                        uart_write_bytes(UART_NUM, (const char *)"Camera powered ON\r\n", 20);
-                    }
-                    break;
-                    
-                case CMD_INIT_STORAGE:
-                    break;
-                    
-                case CMD_CAPTURE_FRONT:
-                case CMD_CAPTURE_SIDE:
-                case CMD_CAPTURE_TOP:
-                    handle_capture_view(&msg);
-                    break;
-                    
-                case CMD_SAVE_ASSET:
-                    handle_save_asset(&msg);
-                    break;
-                    
-                case CMD_INVENTORY_WITH_MAC:
-                    if (msg.data) free(msg.data);
-                    break;
-                    
-                case CMD_START_INVENTORY:
-                    handle_inventory_analysis(&msg);
-                    break;
-                    
-                case CMD_OUTBOUND_ANALYZE:
-                    handle_outbound_analyze(&msg);
-                    break;
-                    
-                case CMD_OUTBOUND_UPDATE_QTY:
-                    handle_outbound_update_qty(&msg);
-                    break;
-                    
-                case CMD_INFERENCE_TRIGGER:
-                    handle_inference_trigger(&msg);
-                    break;
-                    
-                default:
-                    ESP_LOGW(TAG, "Unknown command: %d", msg.cmd);
-                    break;
+            printf("[DIAG] AI RCVD msg cmd=%d\n", msg.cmd);
+            if (msg.cmd == CMD_INIT_CAMERA) {
+                // 摄像头硬件已在 app_main 中一次性初始化，这里只标记就绪
+                printf("[DIAG] AI INIT CAMERA (HW initted at boot)\n");
+                g_camera_ready = true;
+                g_camera_power_on = true;
+                uart_write_bytes(UART_NUM, "Camera powered ON\r\n", 20);
+            } else if (msg.cmd == CMD_DEINIT_CAMERA) {
+                // 摄像头硬件保持初始化状态，仅清除软件标志
+                // I2C/DMA 不卸载，避免从任务上下文调用 i2c_driver_delete 崩溃
+                printf("[DIAG] AI DEINIT CAMERA (soft flags only)\n");
+                g_camera_ready = false;
+                g_camera_power_on = false;
+                uart_write_bytes(UART_NUM, "Camera powered OFF\r\n", 21);
+            } else {
+                switch (msg.cmd) {
+                    case CMD_CAPTURE_FRONT: case CMD_CAPTURE_SIDE: case CMD_CAPTURE_TOP: handle_capture_view(&msg); break;
+                    case CMD_SAVE_ASSET: handle_save_asset(&msg); break;
+                    case CMD_START_INVENTORY: handle_inventory_analysis(&msg); break;
+                    case CMD_OUTBOUND_ANALYZE: handle_outbound_analyze(&msg); break;
+                    case CMD_OUTBOUND_UPDATE_QTY: handle_outbound_update_qty(&msg); break;
+                    case CMD_INFERENCE_TRIGGER: handle_inference_trigger(&msg); break;
+                    default: ESP_LOGW(TAG, "Unknown cmd %d", msg.cmd); break;
+                }
             }
-        } else {
-            SAFE_WDT_RESET();
-        }
+        } else { SAFE_WDT_RESET(); }
     }
 }
 
-// ========== 推理任务（后台异步）==========
+// ========== 推理任务 ==========
 static void inference_task(void *pvParameters)
 {
     esp_task_wdt_add(NULL);
-    
     inference_job_t job;
-    
     const int NUM_FRAMES = 3;
-    
     while (1) {
         if (xQueueReceive(xInferenceQueue, &job, pdMS_TO_TICKS(2000))) {
             SAFE_WDT_RESET();
-            
-            float *feature_ptr = NULL;
-            const char *view_name = NULL;
-            
-            if (job.view_cmd == CMD_CAPTURE_FRONT) {
-                feature_ptr = g_front_feature;
-                view_name = "Front";
-            } else if (job.view_cmd == CMD_CAPTURE_SIDE) {
-                feature_ptr = g_side_feature;
-                view_name = "Side";
-            } else {
-                feature_ptr = g_top_feature;
-                view_name = "Top";
-            }
-            
-            ESP_LOGI(TAG, "[INFERENCE] Starting %s view inference...", view_name);
-            
+            float *fp = NULL; const char *vn = NULL;
+            if (job.view_cmd == CMD_CAPTURE_FRONT) { fp = g_front_feature; vn = "Front"; }
+            else if (job.view_cmd == CMD_CAPTURE_SIDE) { fp = g_side_feature; vn = "Side"; }
+            else { fp = g_top_feature; vn = "Top"; }
+            ESP_LOGI(TAG, "[INF] %s start", vn);
             feature_processor_clear_buffer();
-            
-            int frames_captured = 0;
+            int fc = 0;
             for (int i = 0; i < NUM_FRAMES; i++) {
                 if (xSemaphoreTake(xCameraMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-                    float single_frame[FEATURE_VEC_SIZE];
-                    if (camera_module_capture_and_process(single_frame, FEATURE_VEC_SIZE)) {
-                        feature_processor_add_frame(single_frame, FEATURE_VEC_SIZE);
-                        frames_captured++;
-                        ESP_LOGI(TAG, "[INFERENCE] %s frame %d/%d captured", view_name, i + 1, NUM_FRAMES);
-                    } else {
-                        ESP_LOGW(TAG, "[INFERENCE] Failed to capture %s frame %d/%d", view_name, i + 1, NUM_FRAMES);
-                    }
+                    float sf[FEATURE_VEC_SIZE];
+                    if (camera_module_capture_and_process(sf, FEATURE_VEC_SIZE)) { feature_processor_add_frame(sf, FEATURE_VEC_SIZE); fc++; }
                     xSemaphoreGive(xCameraMutex);
-                } else {
-                    ESP_LOGW(TAG, "[INFERENCE] Camera mutex timeout for %s frame %d", view_name, i + 1);
                 }
-                
                 esp_task_wdt_reset();
             }
-            
-            if (frames_captured > 0) {
-                if (feature_processor_get_fused_feature(feature_ptr, FEATURE_VEC_SIZE)) {
-                    ESP_LOGI(TAG, "[INFERENCE] %s view fusion completed (%d frames)", view_name, frames_captured);
-                } else {
-                    ESP_LOGW(TAG, "[INFERENCE] %s view fusion failed", view_name);
-                }
-            } else {
-                ESP_LOGW(TAG, "[INFERENCE] %s view: no frames captured!", view_name);
-            }
-            
+            if (fc > 0 && feature_processor_get_fused_feature(fp, FEATURE_VEC_SIZE))
+                ESP_LOGI(TAG, "[INF] %s fusion %d frames", vn, fc);
+            else ESP_LOGW(TAG, "[INF] %s no frames", vn);
             g_views_processed++;
-            ESP_LOGI(TAG, "[INFERENCE] Progress: %d/%d views processed", g_views_processed, g_total_views);
-            
             if (g_views_processed >= g_total_views) {
-                ESP_LOGI(TAG, "[INFERENCE] All %d views inference completed!", g_total_views);
-                
-                system_msg_t trigger_msg = {0};
-                trigger_msg.cmd = CMD_INFERENCE_TRIGGER;
-                snprintf(trigger_msg.tag_id, sizeof(trigger_msg.tag_id), "%s", job.tag_id);
-                xQueueSend(xSystemQueue, &trigger_msg, portMAX_DELAY);
-                
-                g_views_enqueued = 0;
-                g_views_processed = 0;
-                g_total_views = 0;
+                system_msg_t tm = {0}; tm.cmd = CMD_INFERENCE_TRIGGER;
+                snprintf(tm.tag_id, sizeof(tm.tag_id), "%s", job.tag_id);
+                xQueueSend(xSystemQueue, &tm, portMAX_DELAY);
+                g_views_enqueued = 0; g_views_processed = 0; g_total_views = 0;
             }
-            
             esp_task_wdt_reset();
-        } else {
-            SAFE_WDT_RESET();
-        }
+        } else { SAFE_WDT_RESET(); }
     }
 }
 
@@ -737,31 +344,27 @@ static void inference_task(void *pvParameters)
 static void storage_task(void *pvParameters)
 {
     esp_task_wdt_add(NULL);
-    
     system_msg_t msg;
-
     while (1) {
         if (xQueueReceive(xStorageQueue, &msg, pdMS_TO_TICKS(2000))) {
             SAFE_WDT_RESET();
-            
             switch (msg.cmd) {
                 case CMD_INIT_STORAGE:
-                    if (storage_module_init()) {
-                        g_storage_ready = true;
-                        ESP_LOGI(TAG, "Storage initialized successfully");
-                    } else {
-                        ESP_LOGE(TAG, "Storage initialization failed");
-                    }
+                    if (storage_module_init()) { g_storage_ready = true; ESP_LOGI(TAG, "Storage OK"); }
+                    else ESP_LOGE(TAG, "Storage FAIL");
                     break;
-                    
-                default:
-                    ESP_LOGW(TAG, "Unknown storage command: %d", msg.cmd);
-                    break;
+                default: ESP_LOGW(TAG, "Unknown storage cmd %d", msg.cmd); break;
             }
-        } else {
-            SAFE_WDT_RESET();
-        }
+        } else { SAFE_WDT_RESET(); }
     }
+}
+
+// ========== business_executor 输出回调 ==========
+static void be_output_callback(be_channel_t channel, be_event_t event, const void *data)
+{
+    ESP_LOGI("be_route", "channel=%d event=%d", (int)channel, (int)event);
+    if (channel == BE_CHANNEL_UART0_TEXT) uart_handler_0_on_event(event, data);
+    else uart_handler_1_on_event(event, data);
 }
 
 // ========== 主程序入口 ==========
@@ -773,55 +376,37 @@ void app_main(void)
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
-    
     init_uart();
-    
     led_indicator_init();
     led_set_color(255, 0, 0);
-    
     xSystemQueue = xQueueCreate(10, sizeof(system_msg_t));
     xStorageQueue = xQueueCreate(5, sizeof(system_msg_t));
     xInferenceQueue = xQueueCreate(5, sizeof(inference_job_t));
-    
     xCameraMutex = xSemaphoreCreateMutex();
-    
-    printf("\n");
-    printf("========== MAIN MENU ==========\r\n");
-    printf("  r - Register new asset (入库)\r\n");
-    printf("  o - Outbound asset (出库)\r\n");
-    printf("  c - Inventory existing asset\r\n");
-    printf("  d - Delete asset\r\n");
-    printf("  l - List all assets\r\n");
-    printf("  i - System information\r\n");
-    printf("  help/? - Show this menu\r\n");
-    printf("================================\r\n");
-    printf("[GUIDE] Please select an option: ");
-    fflush(stdout);
-    
-    ESP_LOGI(TAG, "[SYSTEM] ESP32-CAM AI System Ready");
-    
-    // 初始化WS63协议处理器
-    protocol_handler_init();
-    
-    // 初始化并启动L610 4G模块心跳检测
-    ret = l610_manager_init();
-    if (ret == ESP_OK) {
-        ret = l610_manager_start();
-        if (ret == ESP_OK) {
-            ESP_LOGI(TAG, "L610 4G module heartbeat task started");
-        } else {
-            ESP_LOGW(TAG, "L610 4G module start failed: %s", esp_err_to_name(ret));
-        }
+    printf("\n========== MAIN MENU ==========\r\n");
+    printf("  r - Register\r\n  o - Outbound\r\n  c - Inventory\r\n  d - Delete\r\n  l - List\r\n  i - Info\r\n  help/? - Menu\r\n===============================\r\n");
+    printf("[GUIDE] Select: "); fflush(stdout);
+    ESP_LOGI(TAG, "System Ready");
+    storage_module_init();
+    ai_module_init();
+    be_init(be_output_callback);
+    // ⭐ 摄像头在 app_main 中一次性初始化（调度器启动前，core 0 上下文）
+    // i2c_driver_install 必须在 app_main 上下文调用，不能从 FreeRTOS 任务调用
+    // 摄像头硬件保持初始化状态，电源管理通过 GPIO48 单独控制
+    if (camera_module_init()) {
+        ESP_LOGI(TAG, "Camera initialized at boot");
     } else {
-        ESP_LOGW(TAG, "L610 4G module init failed: %s (4G may be unavailable)", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "Camera init failed at boot");
     }
-    
-    xTaskCreate(uart_task, "uart_task", 4096, NULL, 5, NULL);
-    xTaskCreate(camera_ai_task, "camera_ai_task", 8192, NULL, 5, NULL);
+    // ⭐ 先在干净的中断环境下创建任务，再初始化 UART（避免 ISR 干扰任务调度）
+    xTaskCreate(camera_ai_task, "camera_ai_task", 16384, NULL, 7, NULL);
     xTaskCreate(inference_task, "inference_task", 8192, NULL, 4, NULL);
-    xTaskCreate(storage_task, "storage_task", 4096, NULL, 4, NULL);
-    
-    while (1) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
+    xTaskCreate(storage_task, "storage_task", 8192, NULL, 4, NULL);
+    // ⭐ 任务创建完毕后才启用 UART（UART ISR 不再抢占）
+    uart_handler_0_init();
+    uart_handler_1_init();
+    ret = l610_manager_init();
+    if (ret == ESP_OK) { ret = l610_manager_start(); if (ret == ESP_OK) ESP_LOGI(TAG, "L610 OK"); else ESP_LOGW(TAG, "L610 start fail"); }
+    else ESP_LOGW(TAG, "L610 init fail");
+    while (1) { vTaskDelay(pdMS_TO_TICKS(1000)); }
 }

@@ -71,11 +71,6 @@ bool tag_id_validator_validate(const char *tag_id)
         return false;
     }
     
-    if (value > TAG_ID_MAX) {
-        g_last_error = "Value out of range: maximum is 0xFFFF";
-        return false;
-    }
-    
     return true;
 }
 
@@ -166,7 +161,7 @@ bool tag_id_validator_format(uint16_t value, char *out_buf, size_t buf_size)
         return false;
     }
     
-    if (value < TAG_ID_MIN || value > TAG_ID_MAX) {
+    if (value < TAG_ID_MIN) {
         g_last_error = "Value out of valid range (0x0001-0xFFFF)";
         return false;
     }

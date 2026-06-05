@@ -1,9 +1,10 @@
 # 星闪双模资产盘点系统 — 端到端通信协议汇总
 
-> **文档版本**: v1.0  
-> **最后更新**: 2026-05-26  
+> **文档版本**: v1.1  
+> **最后更新**: 2026-05-27  
 > **适用项目**: 星闪双模资产盘点系统  
 > **定位**: 入口文档 — 汇总三端通信全貌、核心流程、映射表  
+> **v1.1 更新**: 同步屏协议 v2.4（控件重命名+Page5设置页+cancel帧）；文档路径更新
 > **详细参考**: 字段定义和完整规范请查阅各专业文档
 
 ---
@@ -12,10 +13,11 @@
 
 | 文档 | 路径 | 职责 |
 |------|------|------|
-| **END_TO_END_PROTOCOL.md** (本文档) | `docs/END_TO_END_PROTOCOL.md` | 入口：流程图、映射表、对照表 |
-| PROTOCOL.md v3.3 | `docs/PROTOCOL.md` | WS63↔ESP32 UART1 JSON 协议完整规范 |
-| WS63_UART_屏协议_Page1-4.md v2.2 | `docs/WS63_UART_屏协议_Page1-4.md` | WS63↔串口屏 UART2 CSV 协议完整规范 |
-| 串口屏端侧代码汇总.md | `docs/串口屏端侧代码汇总.md` | 淘晶驰T1端侧控件、变量、事件代码 |
+| **END_TO_END_PROTOCOL.md** (本文档) | `docs/PROTOCOL/END_TO_END_PROTOCOL.md` | 入口：流程图、映射表、对照表 |
+| ESP32_WS63_PROTOCOL.md v3.3 | `docs/PROTOCOL/ESP32_WS63_PROTOCOL.md` | WS63↔ESP32 UART1 JSON 协议完整规范 |
+| WS63_MONITOR_PROTOCOL.md v2.4 | `docs/PROTOCOL/WS63_MONITOR_PROTOCOL.md` | WS63↔串口屏 UART2 CSV 协议完整规范 |
+| MONITOR_CODE.md | `docs/MONITOR_CODE.md` | 淘晶驰T1端侧控件、变量、事件代码 |
+| fix_plan.md | `docs/fix_plan.md` | WS63开发者快速参考卡 |
 
 ---
 
@@ -58,7 +60,7 @@
 |------|---------|-------------|------------|---------|
 | ESP32-S3 固件 | v3.3 | PROTOCOL.md v3.3 | `0x0001` (含0x前缀) | 验证式更新、分步出库、分页列表、ping心跳 |
 | WS63 固件 | dev | CLAUDE.md v1.0 | `0x0001` (内部) | SLE扫描+连接、Tag映射表、NV持久化 |
-| 串口屏固件 | v1.0 | 屏协议 v2.2 | `0001` (不含0x前缀) | 4页面: 入库/出库/盘点/查找 |
+| 串口屏固件 | v1.0 | 屏协议 v2.4 | `0001` (不含0x前缀) | 5页面: 入库/出库/盘点/查找/设置 |
 | BS21标签 | — | — | MAC地址 (硬件) | SLE广播+通知+深度休眠 |
 
 ### Tag ID 跨端转换规则
@@ -289,22 +291,27 @@ sequenceDiagram
 | | b0/b1 翻页 | `@find,list,<page>\r\n` | `list_assets_page` | `asset_list_page` |
 | | b2 定位 | `@find,locate,<id>\r\n` | ⚠️ WS63→SLE (不经ESP32) | `#LOCATE` |
 | | b5 停止 | `@find,stop\r\n` | ⚠️ WS63→SLE (不经ESP32) | — |
+| | b3 返回 | `@find,cancel\r\n` | `cancel` | `task_done`(cancelled) |
+| **设置** | b1 连接WiFi | `@setting,wifi,<ssid>,<pwd>\r\n` | — (WS63本地) | `#WIFI` |
+| | b4 断开 | `@setting,disconnect\r\n` | — (WS63本地) | `#NET` |
+| | b3 返回 | `@setting,cancel\r\n` | `cancel` | `task_done`(cancelled) |
+| **通用** | b3 返回(各页) | `@in,cancel` / `@out,cancel` / `@check,cancel` / `@find,cancel` / `@setting,cancel` | `cancel` | `task_done`(cancelled) |
 
 ### 5.2 上行消息：ESP32 → WS63 → 串口屏 完整映射
 
 | ESP32→WS63 JSON | WS63→屏 CSV帧 | 屏端显示位置 |
 |----------------|-------------|------------|
-| `task_done`(register, success) | `#DONE,reg,success,<id>\r\n` | Page1 t5, sys0=4 |
-| `task_done`(register, success_updated) | `#DONE,reg,success_updated,<id>\r\n` | Page1 t5, sys0=4 |
-| `task_done`(outbound, is_match=true) | `#DONE,out,success\r\n` | Page2 t5, sys0=4 |
-| `task_done`(outbound, is_match=false) | `#DONE,out,fail\r\n` | Page2 t5 |
-| `task_done`(inventory) | WS63判断confidence≥0.75 → `#DONE,check,match,<conf>\r\n` | Page3 t5 |
-| `capture_progress` | `#PROG,<step>,<view>,<score>\r\n` | t4=步骤, t5=清晰度 |
+| `task_done`(register, success) | `#DONE,reg,success,<id>\r\n` | Page1 t11, sys0=4 |
+| `task_done`(register, success_updated) | `#DONE,reg,success_updated,<id>\r\n` | Page1 t11, sys0=4 |
+| `task_done`(outbound, is_match=true) | `#DONE,out,success\r\n` | Page2 t21, sys0=4 |
+| `task_done`(outbound, is_match=false) | `#DONE,out,fail\r\n` | Page2 t21 |
+| `task_done`(inventory) | WS63判断confidence≥0.75 → `#DONE,check,match,<conf>\r\n` | Page3 t31 |
+| `capture_progress` | `#PROG,<step>,<view>,<score>\r\n` | t4=步骤, t11/t21/t31=清晰度 |
 | `asset_info`(outbound) | `#ASSET_INFO,<id>,<name>,<qty>,<remove>,<remain>\r\n` | Page2 t7, sys0=2 |
 | `asset_detail` / `asset_info`(inventory) | `#TAG_INFO,<id>,<name>,<area>,<count>\r\n` | Page3 t1 |
 | `asset_list_page` | `#LIST,<p>,<tp>,<tc>\r\n` + 逐条 `#ITEM,<s>,...\r\n` | Page4 t0-t7 |
-| `verification_start` | (可选)`#MSG,请拍摄正面视图验证\r\n` | Page1 t5 |
-| `error` | `#ERR,<code>,<msg>\r\n` | 各页t5/t8 |
+| `verification_start` | (可选)`#MSG,请拍摄正面视图验证\r\n` | Page1 t11 |
+| `error` | `#ERR,<code>,<msg>\r\n` | 各页t11/t21/t31/t41/t51 |
 | `pong` | (可选)`#MSG,...` 或仅日志 | — |
 
 ### 5.3 WS63本地下行帧（不经ESP32）
@@ -316,7 +323,9 @@ sequenceDiagram
 | `#VERIFY,<id>,<name>,<area>,<qty>\r\n` | SLE扫描到已注册标签(in) | Page1 t0/t3/t2, t1="count", sys0=5 |
 | `#INV,<sle_count>,<db_total>\r\n` | 全局盘点完成 | Page3 t5 |
 | `#LOCATE,<status>,<id>\r\n` | 标签响应/超时 | Page4 b2.txt/t8 |
-| `#MSG,<text>\r\n` | 通用通知 | 各页t5/t8 |
+| `#NET,<mode>,<status>,<signal>\r\n` | 网络状态变化/上电推送 | Page5 t51 |
+| `#WIFI,<result>\r\n` | WiFi连接结果 | Page5 t51 |
+| `#MSG,<text>\r\n` | 通用通知 | 各页t11/t21/t31/t41/t51 |
 
 ---
 

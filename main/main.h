@@ -6,13 +6,13 @@
 #include "freertos/queue.h"
 #include "driver/gpio.h"  // GPIO引脚定义
 #include "modules/system/asset_manager.h"
-#include "modules/system/protocol_handler.h"
+#include "modules/system/business_executor.h"   // ⭐ 新增：业务执行器
 
 // ========== WS63 协议配置 ==========
-// UART1 配置 (GPIO17: TX, GPIO18: RX)
+// UART1 使用空闲 GPIO47/21，避免与摄像头 DVP GPIO17/18 冲突
 #define WS63_UART_NUM           UART_NUM_1
-#define WS63_UART_TX_PIN        GPIO_NUM_17
-#define WS63_UART_RX_PIN        GPIO_NUM_18
+#define WS63_UART_TX_PIN        GPIO_NUM_47
+#define WS63_UART_RX_PIN        GPIO_NUM_21
 #define WS63_UART_BAUD_RATE     115200
 #define WS63_UART_BUF_SIZE      1024
 #define WS63_UART_QUEUE_SIZE    10
@@ -46,7 +46,8 @@ typedef enum {
     CMD_INVENTORY_WITH_MAC,
     CMD_OUTBOUND_ANALYZE,
     CMD_OUTBOUND_UPDATE_QTY,
-    CMD_INFERENCE_TRIGGER   // 推理任务触发：全部视图推理完成后触发最终操作
+    CMD_INFERENCE_TRIGGER,  // 推理任务触发：全部视图推理完成后触发最终操作
+    CMD_DEINIT_CAMERA       // 异步反初始化摄像头（通过队列，在 camera_ai_task 中执行）
 } system_cmd_t;
 
 // 消息结构体（需要被cmd_handler访问）
@@ -75,8 +76,8 @@ typedef enum {
     CAM_STATE_READY = 14                // 就绪状态，可以拍摄
 } camera_state_t;
 
-// 视图状态枚举（已在protocol_handler.h中定义为capture_view_t）
-typedef capture_view_t view_state_t;
+// 视图状态枚举（已在 business_executor.h 中定义为 be_view_t）
+typedef be_view_t view_state_t;
 
 // 盘点状态枚举
 typedef enum {
@@ -111,6 +112,7 @@ extern float g_side_feature[];
 extern float g_top_feature[];
 extern bool g_camera_ready;
 extern bool g_storage_ready;
+extern bool g_camera_power_on;
 extern bool g_is_inventory_mode;    // 区分注册和盘点模式的标志位
 extern bool g_is_outbound_mode;     // 区分出库模式的标志位
 extern char g_reg_item_name[];      // 注册模式：物品名称
