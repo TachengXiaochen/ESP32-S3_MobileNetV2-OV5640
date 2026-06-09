@@ -84,7 +84,7 @@ idf.py flash monitor
 }
 ```
 - Tag ID已存在时，必须拍摄正视图进行身份验证
-- 相似度≥0.75才允许累加数量
+- **相似度≥0.90才允许累加数量** ⭐v3.5：阈值从0.75提升至0.90
 - 验证失败明确拒绝，防止错误操作
 
 ### 2. 资产盘点（Inventory）
@@ -151,7 +151,7 @@ WS63                          ESP32-S3
 | `sys_info` | ⭐系统信息响应（v3.4） |
 | `error` | 错误报告 |
 
-**详细协议规范**：查看 [docs/PROTOCOL/ESP32_WS63_PROTOCOL.md](docs/PROTOCOL/ESP32_WS63_PROTOCOL.md)
+**详细协议规范**：查看 [docs/PROTOCOL/ESP32_WS63_PROTOCOL.md](docs/PROTOCOL/ESP32_WS63_PROTOCOL.md) ⭐v3.4
 
 ### Outbound 分步控制流程 ⭐v3.4
 
@@ -237,7 +237,7 @@ L610模块可主动向WS63上报事件：
 
 ### AT指令透传（调试用）
 
-``json
+```json
 {"cmd": "l610_at", "at": "AT+CSQ"}
 ```
 
@@ -295,7 +295,9 @@ L610模块可主动向WS63上报事件：
 
 **核心文档**：
 - 📘 **入门**: [QUICKSTART.md](docs/QUICKSTART.md) | [USER_GUIDE.md](docs/USER_GUIDE.md)
-- 📗 **协议**: [PROTOCOL.md](docs/PROTOCOL.md) ⭐统一协议文档（v3.2）
+- 📗 **协议**: 
+  - [ESP32_WS63_PROTOCOL.md](docs/PROTOCOL/ESP32_WS63_PROTOCOL.md) ⭐v3.4（主协议）
+  - [WS63_MONITOR_PROTOCOL.md](docs/PROTOCOL/WS63_MONITOR_PROTOCOL.md) ⭐v2.4（屏协议）
 - 📙 **调试**: [L610_DEBUG_GUIDE.md](docs/L610_DEBUG_GUIDE.md) | [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)
 
 **历史文档**: 查看 `docs/archive/` 目录
@@ -312,8 +314,11 @@ main/
 │   ├── camera/          # 摄像头驱动（OV5640）
 │   ├── ai/              # AI推理引擎（MobileNetV2）
 │   ├── system/          # 系统管理（协议处理、状态机、验证器）
-│   │   ├── tag_id/      # ⭐ Tag ID 验证器（v3.2）
-│   │   └── verify/      # ⭐ 身份验证模块（v3.2）
+│   │   ├── tag_id_validator.c/.h      # ⭐ Tag ID 验证器（v3.2）
+│   │   ├── verify_handler.c/.h        # ⭐ 身份验证处理器（v3.2）
+│   │   ├── business_executor.c/.h     # ⭐ 业务执行器（v3.4）- 统一命令处理+双通道输出
+│   │   ├── uart_handler_0.c/.h        # ⭐ CLI文本接口处理器（v3.4）
+│   │   └── uart_handler_1.c/.h        # ⭐ WS63 JSON协议处理器（v3.4）
 │   └── 4g/              # L610 4G模块驱动（v3.1）
 └── app_main.c           # 应用入口
 ```
@@ -322,19 +327,22 @@ main/
 
 | 任务 | 优先级 | 职责 |
 |------|--------|------|
-| Camera Task | 5 | 图像采集、多帧融合 |
-| AI Inference Task | 4 | 特征提取、相似度计算 |
-| Protocol Handler | 5 | UART1命令解析、JSON通信 |
+| Camera Task | 5 | 图像采集、自适应帧数融合（1-3帧） |
+| AI Inference Task | 4 | GAP特征提取、余弦相似度计算 |
+| UART Handler 0 (CLI) | 5 | CLI文本命令解析（v3.4拆分） |
+| UART Handler 1 (WS63) | 5 | WS63 JSON协议解析（v3.4拆分） |
+| Business Executor | 5 | 业务逻辑统一处理+双通道输出（v3.4新增） |
 | L610 Heartbeat | 4 | 4G模块心跳检测（v3.1） |
 | LED Indicator | 3 | WS2812状态指示 |
+| Web Server | 5 | WiFi SoftAP + MJPEG流（v3.5调试用） |
 
 ### 关键技术
 
 - **标识方式**：16位十六进制Tag ID（`0x0001`-`0xFFFF`）
-- **验证算法**：混合相似度 = 0.7×余弦 + 0.3×欧氏，阈值0.75
-- **特征提取**：MobileNetV2，1280维特征向量
-- **模糊度检测**：拉普拉斯方差算法，阈值80分
-- **多帧融合**：每次拍摄采集3帧，取最优特征
+- **验证算法**：**纯余弦相似度** ⭐v3.5，阈值**0.90**（移除无效的Euclidean混合）
+- **特征提取**：MobileNetV2 **GAP 1280维语义特征** ⭐v3.5（替代1000维logits）
+- **模糊度检测**：拉普拉斯方差算法，降采样2×（160×120），速度提升4倍
+- **多帧融合**：**自适应帧数** ⭐v3.5，默认每视图1帧，边缘情况自动补充至3帧
 - **看门狗管理**：长耗时操作分段执行，定期复位
 
 ---
