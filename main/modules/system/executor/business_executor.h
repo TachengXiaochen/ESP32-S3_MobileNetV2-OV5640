@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "esp_err.h"
-#include "modules/system/asset_manager.h"  // asset_record_t, TAG_ID_STR_LEN, FEATURE_VEC_SIZE
+#include "asset_manager.h"  // asset_record_t, TAG_ID_STR_LEN, FEATURE_VEC_SIZE
 
 #ifdef __cplusplus
 extern "C" {
@@ -66,6 +66,15 @@ typedef enum {
     BE_CMD_PING,
     BE_CMD_UNKNOWN
 } be_cmd_t;
+
+// ========== 内部状态机枚举 ==========
+typedef enum {
+    BE_STATE_IDLE,
+    BE_STATE_HARDWARE_INIT,
+    BE_STATE_WAITING_CAPTURE,
+    BE_STATE_CAPTURING,
+    BE_STATE_FINALIZING
+} be_state_t;
 
 // ========== 业务事件枚举 ==========
 typedef enum {
@@ -224,6 +233,15 @@ bool be_on_all_views_done(void);  // 返回 true 表示 business_executor 已处
  * uart_handler_1 在初始化时调用此函数，让 L610 manager 可以直接往 WS63 发数据。
  */
 void be_register_ws63_send_func(void (*func)(const char *));
+
+// ========== 全局状态变量（供外部模块同步业务状态）==========
+extern be_state_t g_be_state;
+extern be_cmd_t g_be_task;
+extern char g_be_tag_id[TAG_ID_STR_LEN];
+extern char g_be_item_name[128];
+extern char g_be_storage_area;
+extern uint32_t g_be_quantity;
+extern uint32_t g_be_remove_qty;
 
 #ifdef __cplusplus
 }

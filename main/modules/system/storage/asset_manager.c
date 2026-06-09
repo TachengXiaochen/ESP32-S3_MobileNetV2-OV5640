@@ -11,6 +11,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <unistd.h>
 #include <errno.h>
 
 static const char *TAG = "asset_manager";
@@ -141,12 +142,73 @@ static void get_current_asset_dir(char *path, size_t path_size)
 }
 
 /**
+ * @brief 检测identifier是否为Tag ID格式
+ * @return true表示Tag ID格式（以0x开头），false表示旧MAC格式
+ */
+static bool is_tag_id_format(const char *identifier)
+{
+    if (identifier == NULL) return false;
+    return (strncmp(identifier, "0x", 2) == 0 || strncmp(identifier, "0X", 2) == 0);
+}
+
+/**
+ * @brief 确保资产的Tag ID子目录存在
+ *
+ * 对于Tag ID格式（0x0001），创建 /sdcard/assets/0x0001/
+ * 对于旧MAC格式，保持平铺结构，返回 /sdcard/assets/
+ *
+ * @param identifier Tag ID或旧MAC地址
+ * @param subdir_path 输出参数，子目录路径
+ * @param path_size subdir_path缓冲区大小
+ * @return ESP_OK表示成功
+ */
+static esp_err_t ensure_asset_subdir(const char *identifier, char *subdir_path, size_t path_size)
+{
+    if (!identifier || !subdir_path) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (is_tag_id_format(identifier)) {
+        // Tag ID 格式：创建 /sdcard/assets/{tag_id}/ 子目录
+        snprintf(subdir_path, path_size, "%s/%s", ASSET_DIR_SD, identifier);
+    } else {
+        // 旧 MAC 格式：提取safe name（替换':'为'_'）作为子目录名
+        char safe_name[64] = {0};
+        size_t copy_len = strlen(identifier);
+        if (copy_len > sizeof(safe_name) - 1) {
+            copy_len = sizeof(safe_name) - 1;
+        }
+        strncpy(safe_name, identifier, copy_len);
+        safe_name[copy_len] = '\0';
+        for (int i = 0; i < (int)strlen(safe_name); i++) {
+            if (safe_name[i] == ':') safe_name[i] = '_';
+        }
+        snprintf(subdir_path, path_size, "%s/%s", ASSET_DIR_SD, safe_name);
+    }
+
+    // 检查子目录是否存在，不存在则创建
+    struct stat st;
+    if (stat(subdir_path, &st) != 0) {
+        ESP_LOGI(TAG, "Creating tag subdirectory: %s", subdir_path);
+        int ret = mkdir(subdir_path, 0755);
+        if (ret != 0) {
+            ESP_LOGE(TAG, "Failed to create subdirectory: %s (errno=%d - %s)",
+                     subdir_path, errno, strerror(errno));
+            return ESP_FAIL;
+        }
+        ESP_LOGI(TAG, "Subdirectory created successfully");
+    }
+
+    return ESP_OK;
+}
+
+/**
  * @brief 生成资产文件路径
- * 
+ *
  * ⭐ Tag ID 改造：
  * - 旧格式：AA_BB_CC_DD_EE_FF.dat（MAC地址下划线转义）
  * - 新格式：0x0001.dat（直接使用 Tag ID）
- * 
+ *
  * 检测逻辑：如果输入以 "0x" 开头，按 Tag ID 格式处理；
  * 否则按旧 MAC 地址格式处理（向后兼容）。
  */
@@ -156,34 +218,40 @@ static void get_asset_file_path(const char *identifier, char *path, size_t path_
     get_current_asset_dir(asset_dir, sizeof(asset_dir));
 
     char safe_name[64] = {0};
-    
-    // ⭐ 检测是否为 Tag ID 格式（以 "0x" 开头）
-    if (identifier != NULL && (strncmp(identifier, "0x", 2) == 0 || strncmp(identifier, "0X", 2) == 0)) {
-        // Tag ID 格式：直接使用，无需转义
-        // 例如: 0x0001.dat
-        strncpy(safe_name, identifier, sizeof(safe_name) - 1);
-        ESP_LOGI(TAG, "Tag ID format detected: %s", identifier);
-    } else {
-        // 旧 MAC 地址格式：将 ':' 替换为 '_'
-        // 例如: AA:BB:CC:DD:EE:FF -> AA_BB_CC_DD_EE_FF.dat
-        if (identifier != NULL) {
+    bool is_tag_id = is_tag_id_format(identifier);
+
+    if (identifier != NULL) {
+        if (is_tag_id) {
+            // Tag ID 格式：直接使用，无需转义
+            // 例如: 0x0001
+            strncpy(safe_name, identifier, sizeof(safe_name) - 1);
+            ESP_LOGI(TAG, "Tag ID format detected: %s", identifier);
+        } else {
+            // 旧 MAC 地址格式：将 ':' 替换为 '_'
+            // 例如: AA:BB:CC:DD:EE:FF -> AA_BB_CC_DD_EE_FF
             size_t copy_len = strlen(identifier);
-            if (copy_len > sizeof(safe_name) - 1) {
+            if (copy_len > (int)(sizeof(safe_name) - 1)) {
                 copy_len = sizeof(safe_name) - 1;
             }
             strncpy(safe_name, identifier, copy_len);
             safe_name[copy_len] = '\0';
-            
-            for (int i = 0; i < strlen(safe_name); i++) {
+
+            for (int i = 0; i < (int)strlen(safe_name); i++) {
                 if (safe_name[i] == ':') {
                     safe_name[i] = '_';
                 }
             }
+            ESP_LOGI(TAG, "Legacy MAC format detected: %s -> %s", identifier, safe_name);
         }
-        ESP_LOGI(TAG, "Legacy MAC format detected: %s -> %s", identifier ? identifier : "NULL", safe_name);
     }
-    
-    snprintf(path, path_size, "%s/%s.%s", asset_dir, safe_name, extension);
+
+    // ⭐ Tag ID 格式使用子目录：/sdcard/assets/0x0001/0x0001.dat
+    // 旧 MAC 格式保持平铺：/sdcard/assets/AA_BB_CC_DD_EE_FF.dat
+    if (is_tag_id) {
+        snprintf(path, path_size, "%s/%s/%s.%s", asset_dir, safe_name, safe_name, extension);
+    } else {
+        snprintf(path, path_size, "%s/%s.%s", asset_dir, safe_name, extension);
+    }
     ESP_LOGD(TAG, "Generated file path: %s", path);
 }
 
@@ -283,6 +351,15 @@ esp_err_t asset_save(const asset_record_t *record, bool *is_overwrite)
         ESP_LOGI(TAG, "Directory already exists");
     }
 
+    // ⭐ 确保Tag ID子目录存在（新格式使用子文件夹组织）
+    if (is_tag_id_format(identifier)) {
+        char subdir_path[128];
+        esp_err_t subdir_ret = ensure_asset_subdir(identifier, subdir_path, sizeof(subdir_path));
+        if (subdir_ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to ensure tag subdirectory, attempting save anyway");
+        }
+    }
+
     // ✅ 移除临时测试代码，减少不必要的IO操作
     FILE *f = fopen(file_path, "wb");
     if (!f) {
@@ -347,8 +424,18 @@ esp_err_t asset_load(const char *mac_address, asset_record_t *record)
     // 检查文件是否存在
     struct stat st;
     if (stat(file_path, &st) != 0) {
-        ESP_LOGW(TAG, "Asset file not found: %s", file_path);
-        return ESP_ERR_NOT_FOUND;
+        // ⭐ 向后兼容：如果新子目录路径不存在，尝试旧平铺路径
+        if (is_tag_id_format(mac_address)) {
+            ESP_LOGW(TAG, "Asset not found at new path, trying legacy flat path...");
+            snprintf(file_path, sizeof(file_path), "%s/%s.dat", ASSET_DIR_SD, mac_address);
+            if (stat(file_path, &st) != 0) {
+                ESP_LOGW(TAG, "Asset file not found: %s (neither new nor legacy path)", mac_address);
+                return ESP_ERR_NOT_FOUND;
+            }
+        } else {
+            ESP_LOGW(TAG, "Asset file not found: %s", file_path);
+            return ESP_ERR_NOT_FOUND;
+        }
     }
 
     ESP_LOGI(TAG, "Loading asset from: %s", file_path);
@@ -430,114 +517,99 @@ esp_err_t asset_delete(const char *mac_address)
         return ESP_ERR_INVALID_ARG;
     }
 
-    ESP_LOGI(TAG, "Deleting asset files for MAC: %s", mac_address);
-    
+    ESP_LOGI(TAG, "Deleting asset files for: %s", mac_address);
+
     int deleted_count = 0;
     int failed_count = 0;
-    char file_path[128];
+    struct stat st;
 
-    // ✅ 调试：先列出assets目录下的所有文件
-    char asset_dir[64];
-    get_current_asset_dir(asset_dir, sizeof(asset_dir));
-    ESP_LOGI(TAG, "Assets directory: %s", asset_dir);
-    
-    DIR *dir = opendir(asset_dir);
-    if (dir) {
-        struct dirent *entry;
-        ESP_LOGI(TAG, "Files in assets directory:");
-        while ((entry = readdir(dir)) != NULL) {
-            if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0) {
-                ESP_LOGI(TAG, "  - %s", entry->d_name);
+    // ⭐ 构建 safe_name（统一 tag_id 和旧 MAC 处理）
+    bool is_tag_id = is_tag_id_format(mac_address);
+    char safe_name[64] = {0};
+    if (mac_address != NULL) {
+        if (is_tag_id) {
+            strncpy(safe_name, mac_address, sizeof(safe_name) - 1);
+        } else {
+            size_t copy_len = strlen(mac_address);
+            if (copy_len > sizeof(safe_name) - 1) copy_len = sizeof(safe_name) - 1;
+            strncpy(safe_name, mac_address, copy_len);
+            safe_name[copy_len] = '\0';
+            for (int i = 0; i < (int)strlen(safe_name); i++) {
+                if (safe_name[i] == ':') safe_name[i] = '_';
             }
         }
-        closedir(dir);
-    } else {
-        ESP_LOGE(TAG, "Failed to open assets directory!");
     }
 
-    // 1. 删除特征文件 (.dat)
-    get_asset_file_path(mac_address, file_path, sizeof(file_path), "dat");
-
-    ESP_LOGI(TAG, "Attempting to delete feature file: %s", file_path);
-
-    // 检查文件是否存在
-    struct stat st;
-    if (stat(file_path, &st) == 0) {
-        if (remove(file_path) == 0) {
-            ESP_LOGI(TAG, "Deleted feature file: %s", file_path);
-            deleted_count++;
-        } else {
-            ESP_LOGW(TAG, "Feature file delete failed: %s (error: %s)", file_path, strerror(errno));
-            failed_count++;
-        }
-    } else {
-        ESP_LOGW(TAG, "Feature file not found: %s (will continue to delete other files)", file_path);
-        // 文件不存在不算失败，继续删除其他文件
-    }
-    
-    // 准备安全的MAC字符串用于图片路径构建 (将 ':' 替换为 '_')
-    char safe_mac[MAC_ADDR_LEN + 1];
-    strncpy(safe_mac, mac_address, MAC_ADDR_LEN);
-    safe_mac[MAC_ADDR_LEN] = '\0';
-    for (int i = 0; i < strlen(safe_mac); i++) {
-        if (safe_mac[i] == ':') {
-            safe_mac[i] = '_';
-        }
-    }
-
+    char asset_dir[64];
     get_current_asset_dir(asset_dir, sizeof(asset_dir));
 
-    // 2. 删除正面图片 (front.jpg)
-    snprintf(file_path, sizeof(file_path), "%s/%s_front.jpg", asset_dir, safe_mac);
+    // 构建新旧两条路径并尝试删除的辅助块
+    #define DELETE_TWO_PATHS(new_path, legacy_path) \
+        do { \
+            if (stat((new_path), &st) == 0) { \
+                ESP_LOGI(TAG, "Deleting: %s", (new_path)); \
+                if (remove((new_path)) == 0) { deleted_count++; } \
+                else { ESP_LOGW(TAG, "Delete failed: %s", (new_path)); failed_count++; } \
+            } else if (stat((legacy_path), &st) == 0) { \
+                ESP_LOGI(TAG, "Deleting (legacy): %s", (legacy_path)); \
+                if (remove((legacy_path)) == 0) { deleted_count++; } \
+                else { ESP_LOGW(TAG, "Delete failed: %s", (legacy_path)); failed_count++; } \
+            } else { \
+                ESP_LOGD(TAG, "File not found for %s", safe_name); \
+            } \
+        } while(0)
 
-    if (stat(file_path, &st) == 0) {
-        if (remove(file_path) == 0) {
-            ESP_LOGI(TAG, "Deleted front image: %s", file_path);
-            deleted_count++;
+    // 1. 删除特征文件 (.dat)
+    {
+        char new_path[128], legacy_path[128];
+        if (is_tag_id) {
+            snprintf(new_path, sizeof(new_path), "%s/%s/%s.dat", asset_dir, safe_name, safe_name);
+            snprintf(legacy_path, sizeof(legacy_path), "%s/%s.dat", asset_dir, safe_name);
         } else {
-            ESP_LOGD(TAG, "Front image delete failed: %s (error: %s)", file_path, strerror(errno));
+            snprintf(new_path, sizeof(new_path), "%s/%s.dat", asset_dir, safe_name);
+            snprintf(legacy_path, sizeof(legacy_path), "%s/%s.dat", asset_dir, safe_name);
         }
-    } else {
-        ESP_LOGD(TAG, "Front image not found: %s", file_path);
+        DELETE_TWO_PATHS(new_path, legacy_path);
     }
-    
-    // 3. 删除侧面图片 (side.jpg)
-    snprintf(file_path, sizeof(file_path), "%s/%s_side.jpg", asset_dir, safe_mac);
 
-    if (stat(file_path, &st) == 0) {
-        if (remove(file_path) == 0) {
-            ESP_LOGI(TAG, "Deleted side image: %s", file_path);
-            deleted_count++;
-        } else {
-            ESP_LOGD(TAG, "Side image delete failed: %s (error: %s)", file_path, strerror(errno));
+    // 2-4. 删除三张图片
+    {
+        const char *views[] = {"front", "side", "top"};
+        for (int v = 0; v < 3; v++) {
+            char new_path[128], legacy_path[128];
+            if (is_tag_id) {
+                snprintf(new_path, sizeof(new_path), "%s/%s/%s_%s.jpg",
+                         asset_dir, safe_name, safe_name, views[v]);
+                snprintf(legacy_path, sizeof(legacy_path), "%s/%s_%s.jpg",
+                         asset_dir, safe_name, views[v]);
+            } else {
+                snprintf(new_path, sizeof(new_path), "%s/%s_%s.jpg",
+                         asset_dir, safe_name, views[v]);
+                snprintf(legacy_path, sizeof(legacy_path), "%s/%s_%s.jpg",
+                         asset_dir, safe_name, views[v]);
+            }
+            DELETE_TWO_PATHS(new_path, legacy_path);
         }
-    } else {
-        ESP_LOGD(TAG, "Side image not found: %s", file_path);
     }
-    
-    // 4. 删除顶部图片 (top.jpg)
-    snprintf(file_path, sizeof(file_path), "%s/%s_top.jpg", asset_dir, safe_mac);
 
-    if (stat(file_path, &st) == 0) {
-        if (remove(file_path) == 0) {
-            ESP_LOGI(TAG, "Deleted top image: %s", file_path);
-            deleted_count++;
-        } else {
-            ESP_LOGD(TAG, "Top image delete failed: %s (error: %s)", file_path, strerror(errno));
+    #undef DELETE_TWO_PATHS
+
+    // ⭐ 删除后尝试清理空子目录（仅 Tag ID 格式）
+    if (is_tag_id) {
+        char subdir_path[128];
+        snprintf(subdir_path, sizeof(subdir_path), "%s/%s", ASSET_DIR_SD, safe_name);
+        if (rmdir(subdir_path) == 0) {
+            ESP_LOGI(TAG, "Removed empty tag directory: %s", subdir_path);
         }
-    } else {
-        ESP_LOGD(TAG, "Top image not found: %s", file_path);
     }
-    
-    ESP_LOGI(TAG, "Asset deletion completed for %s: %d files deleted, %d failed", 
+
+    ESP_LOGI(TAG, "Asset deletion completed for %s: %d files deleted, %d failed",
              mac_address, deleted_count, failed_count);
-    
-    // 如果至少删除了一个文件，或者所有文件都不存在（视为成功清理），则返回 OK
-    // 只有当尝试删除但发生错误时才增加 failed_count
+
     if (failed_count > 0 && deleted_count == 0) {
         return ESP_FAIL;
     }
-    
+
     return ESP_OK;
 }
 
@@ -601,19 +673,41 @@ esp_err_t asset_list_all(int *count)
     uart_write_bytes(UART_NUM_0, header_buf, strlen(header_buf));
     
     while ((entry = readdir(dir)) != NULL) {
-        // 只处理.dat文件
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+
+        // ⭐ 尝试作为子目录打开（Tag ID 格式的子文件夹）
+        char sub_path[320];
+        snprintf(sub_path, sizeof(sub_path), "%.63s/%.255s", asset_dir, entry->d_name);
+        DIR *sub_dir = opendir(sub_path);
+        if (sub_dir) {
+            struct dirent *sub_entry;
+            while ((sub_entry = readdir(sub_dir)) != NULL) {
+                if (strstr(sub_entry->d_name, ".dat") != NULL) {
+                    char tag_id_display[TAG_ID_STR_LEN];
+                    strncpy(tag_id_display, sub_entry->d_name, TAG_ID_STR_LEN - 1);
+                    tag_id_display[TAG_ID_STR_LEN - 1] = '\0';
+                    char *dot = strstr(tag_id_display, ".dat");
+                    if (dot) *dot = '\0';
+
+                    char item_buf[64];
+                    snprintf(item_buf, sizeof(item_buf), "  [%d] Tag ID: %s\r\n", asset_count + 1, tag_id_display);
+                    uart_write_bytes(UART_NUM_0, item_buf, strlen(item_buf));
+                    asset_count++;
+                }
+            }
+            closedir(sub_dir);
+            continue;
+        }
+
+        // ⭐ 旧格式平铺 .dat 文件（向后兼容）
         if (strstr(entry->d_name, ".dat") != NULL) {
-            // Tag ID 直接显示文件名（不含扩展名）
             char tag_id_display[TAG_ID_STR_LEN];
             strncpy(tag_id_display, entry->d_name, TAG_ID_STR_LEN - 1);
             tag_id_display[TAG_ID_STR_LEN - 1] = '\0';
-            
-            // 移除扩展名
+
             char *dot = strstr(tag_id_display, ".dat");
-            if (dot) {
-                *dot = '\0';
-            }
-            
+            if (dot) *dot = '\0';
+
             char item_buf[64];
             snprintf(item_buf, sizeof(item_buf), "  [%d] Tag ID: %s\r\n", asset_count + 1, tag_id_display);
             uart_write_bytes(UART_NUM_0, item_buf, strlen(item_buf));
@@ -816,65 +910,78 @@ void asset_list_uart(void)
 
     struct dirent *entry;
     int index = 1;
+
+    // 辅助宏：处理单个 .dat 条目（提取显示名并输出）
+    #define PROCESS_DAT_ENTRY(filename) \
+        do { \
+            char name_buf[32]; \
+            strncpy(name_buf, (filename), sizeof(name_buf) - 1); \
+            name_buf[sizeof(name_buf) - 1] = '\0'; \
+            char *dot = strrchr(name_buf, '.'); \
+            if (dot) *dot = '\0'; \
+            bool is_tag = is_tag_id_format(name_buf); \
+            char display_id[32]; \
+            if (is_tag) { \
+                snprintf(display_id, sizeof(display_id), "%s", name_buf); \
+            } else { \
+                snprintf(display_id, sizeof(display_id), "%s", name_buf); \
+                for (int i = 0; display_id[i] != '\0'; i++) { \
+                    if (display_id[i] == '_') display_id[i] = ':'; \
+                } \
+            } \
+            asset_record_t *record = (asset_record_t *)malloc(sizeof(asset_record_t)); \
+            if (record) { \
+                esp_err_t load_ret = asset_load(display_id, record); \
+                if (load_ret == ESP_OK && record->is_valid) { \
+                    const char *label = is_tag ? "TAG" : "MAC"; \
+                    char item_buf[192]; \
+                    snprintf(item_buf, sizeof(item_buf), \
+                             "  [%d] %s: %-8s | %-20s | %c | %lu\r\n", \
+                             index++, label, display_id, record->item_name, \
+                             record->storage_area, (unsigned long)record->quantity); \
+                    uart_write_bytes(UART_NUM_0, item_buf, strlen(item_buf)); \
+                } else { \
+                    const char *label = is_tag ? "TAG" : "MAC"; \
+                    char item_buf[64]; \
+                    snprintf(item_buf, sizeof(item_buf), "  [%d] %s: %s\r\n", index++, label, display_id); \
+                    uart_write_bytes(UART_NUM_0, item_buf, strlen(item_buf)); \
+                } \
+                free(record); \
+            } else { \
+                const char *label = is_tag ? "TAG" : "MAC"; \
+                char item_buf[64]; \
+                snprintf(item_buf, sizeof(item_buf), "  [%d] %s: %s\r\n", index++, label, display_id); \
+                uart_write_bytes(UART_NUM_0, item_buf, strlen(item_buf)); \
+            } \
+        } while(0)
+
     while ((entry = readdir(dir)) != NULL) {
-        // 跳过 "." 和 ".."
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+
+        // ⭐ 尝试作为子目录打开（Tag ID 格式的子文件夹）
+        char sub_path[320];
+        snprintf(sub_path, sizeof(sub_path), "%.63s/%.255s", asset_dir, entry->d_name);
+        DIR *sub_dir = opendir(sub_path);
+        if (sub_dir) {
+            struct dirent *sub_entry;
+            while ((sub_entry = readdir(sub_dir)) != NULL) {
+                const char *ext = strrchr(sub_entry->d_name, '.');
+                if (ext && strcmp(ext, ".dat") == 0) {
+                    PROCESS_DAT_ENTRY(sub_entry->d_name);
+                }
+            }
+            closedir(sub_dir);
             continue;
         }
 
-        // ✅ 只显示.dat文件(与asset_save/asset_load保持一致)
+        // ⭐ 旧格式平铺 .dat 文件（向后兼容）
         const char *ext = strrchr(entry->d_name, '.');
         if (ext && strcmp(ext, ".dat") == 0) {
-            // ⭐ 提取标识符显示名：先移除扩展名
-            char name_buf[32];
-            strncpy(name_buf, entry->d_name, sizeof(name_buf) - 1);
-            name_buf[sizeof(name_buf) - 1] = '\0';
-            char *dot = strrchr(name_buf, '.');
-            if (dot) *dot = '\0';
-            
-            // ⭐ 检测是否为 Tag ID 格式（0x开头）
-            bool is_tag_id = (strncmp(name_buf, "0x", 2) == 0 || strncmp(name_buf, "0X", 2) == 0);
-            
-            char display_id[32];
-            if (is_tag_id) {
-                // Tag ID: 直接使用
-                snprintf(display_id, sizeof(display_id), "%s", name_buf);
-            } else {
-                // 旧MAC: 下划线 → 冒号
-                snprintf(display_id, sizeof(display_id), "%s", name_buf);
-                for (int i = 0; display_id[i] != '\0'; i++) {
-                    if (display_id[i] == '_') display_id[i] = ':';
-                }
-            }
-            
-            // 加载资产记录获取详细信息
-            asset_record_t *record = (asset_record_t *)malloc(sizeof(asset_record_t));
-            if (record) {
-                esp_err_t load_ret = asset_load(display_id, record);
-                
-                if (load_ret == ESP_OK && record->is_valid) {
-                    const char *label = is_tag_id ? "TAG" : "MAC";
-                    char item_buf[192];
-                    snprintf(item_buf, sizeof(item_buf), 
-                             "  [%d] %s: %-8s | %-20s | %c | %lu\r\n",
-                             index++, label, display_id, record->item_name, 
-                             record->storage_area, (unsigned long)record->quantity);
-                    uart_write_bytes(UART_NUM_0, item_buf, strlen(item_buf));
-                } else {
-                    const char *label = is_tag_id ? "TAG" : "MAC";
-                    char item_buf[64];
-                    snprintf(item_buf, sizeof(item_buf), "  [%d] %s: %s\r\n", index++, label, display_id);
-                    uart_write_bytes(UART_NUM_0, item_buf, strlen(item_buf));
-                }
-                free(record);
-            } else {
-                const char *label = is_tag_id ? "TAG" : "MAC";
-                char item_buf[64];
-                snprintf(item_buf, sizeof(item_buf), "  [%d] %s: %s\r\n", index++, label, display_id);
-                uart_write_bytes(UART_NUM_0, item_buf, strlen(item_buf));
-            }
+            PROCESS_DAT_ENTRY(entry->d_name);
         }
     }
+
+    #undef PROCESS_DAT_ENTRY
 
     closedir(dir);
 
@@ -900,39 +1007,45 @@ esp_err_t asset_save_image(const char *identifier, const char *view_name,
         return ESP_ERR_INVALID_ARG;
     }
 
-    // 生成图片文件路径：/sdcard/assets/{ID}_{VIEW}.jpg
+    // 生成图片文件路径
+    // ⭐ Tag ID: /sdcard/assets/0x0001/0x0001_front.jpg
+    // ⭐ 旧 MAC: /sdcard/assets/AA_BB_CC_DD_EE_FF_front.jpg (向后兼容)
     char file_path[128];
     char asset_dir[64];
     get_current_asset_dir(asset_dir, sizeof(asset_dir));
 
     char safe_name[64] = {0};
-    
-    // ⭐ 检测是否为 Tag ID 格式（以 "0x" 开头）
-    if (strncmp(identifier, "0x", 2) == 0 || strncmp(identifier, "0X", 2) == 0) {
-        // Tag ID 格式：直接使用，无需转义
-        // 例如: 0x0001_front.jpg
-        strncpy(safe_name, identifier, sizeof(safe_name) - 1);
-        ESP_LOGI(TAG, "Tag ID format detected for image: %s", identifier);
-    } else {
-        // 旧 MAC 地址格式：将 ':' 替换为 '_'
-        // 例如: AA:BB:CC:DD:EE:FF_front.jpg
-        size_t copy_len = strlen(identifier);
-        if (copy_len > sizeof(safe_name) - 1) {
-            copy_len = sizeof(safe_name) - 1;
-        }
-        strncpy(safe_name, identifier, copy_len);
-        safe_name[copy_len] = '\0';
-        for (int i = 0; i < strlen(safe_name); i++) {
-            if (safe_name[i] == ':') {
-                safe_name[i] = '_';
+    bool is_tag_id = is_tag_id_format(identifier);
+
+    if (identifier != NULL) {
+        if (is_tag_id) {
+            // Tag ID 格式：直接使用，无需转义
+            strncpy(safe_name, identifier, sizeof(safe_name) - 1);
+            ESP_LOGI(TAG, "Tag ID format detected for image: %s", identifier);
+        } else {
+            // 旧 MAC 地址格式：将 ':' 替换为 '_'
+            size_t copy_len = strlen(identifier);
+            if (copy_len > sizeof(safe_name) - 1) {
+                copy_len = sizeof(safe_name) - 1;
             }
+            strncpy(safe_name, identifier, copy_len);
+            safe_name[copy_len] = '\0';
+            for (int i = 0; i < (int)strlen(safe_name); i++) {
+                if (safe_name[i] == ':') {
+                    safe_name[i] = '_';
+                }
+            }
+            ESP_LOGI(TAG, "Legacy MAC format detected for image: %s -> %s", identifier, safe_name);
         }
-        ESP_LOGI(TAG, "Legacy MAC format detected for image: %s -> %s", identifier, safe_name);
     }
-    
-    // 生成文件名：{safe_name}_{view}.jpg
-    snprintf(file_path, sizeof(file_path), "%s/%s_%s.jpg", asset_dir, safe_name, view_name);
-    
+
+    // 生成文件名：Tag ID 使用子目录，旧 MAC 保持平铺
+    if (is_tag_id) {
+        snprintf(file_path, sizeof(file_path), "%s/%s/%s_%s.jpg", asset_dir, safe_name, safe_name, view_name);
+    } else {
+        snprintf(file_path, sizeof(file_path), "%s/%s_%s.jpg", asset_dir, safe_name, view_name);
+    }
+
     ESP_LOGI(TAG, "Saving image to: %s (%u bytes)", file_path, (unsigned int)jpeg_len);
 
     // 【关键修复】在打开文件前，先确保目录存在
@@ -951,6 +1064,15 @@ esp_err_t asset_save_image(const char *identifier, const char *view_name,
             return ESP_FAIL;
         }
         ESP_LOGI(TAG, "Directory created successfully");
+    }
+
+    // ⭐ 确保Tag ID子目录存在（新格式使用子文件夹组织）
+    if (is_tag_id) {
+        char subdir_path[128];
+        esp_err_t subdir_ret = ensure_asset_subdir(identifier, subdir_path, sizeof(subdir_path));
+        if (subdir_ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to ensure tag subdirectory, attempting save anyway");
+        }
     }
 
     // 检查写入空间

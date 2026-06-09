@@ -1,6 +1,6 @@
-# ESP32-S3 CAM AI 资产管理系统 v3.4
+# ESP32-S3 CAM AI 资产管理系统 v3.5
 
-> 基于 **ESP32-S3 + OV5640摄像头 + MobileNetV2** 的智能资产管理系统，通过三视图加权综合判断实现高精度物品识别和盘点。**v3.4** 核心升级：引入 business_executor 业务执行器架构，重构 UART 通信层，GPIO 引脚冲突修复，outbound 分步控制优化。
+> 基于 **ESP32-S3 + OV5640摄像头 + MobileNetV2** 的智能资产管理系统，通过三视图加权综合判断实现高精度物品识别和盘点。**v3.5** 核心升级：AI推理速度优化（30-60s→8.5s，降低80-85%），GAP 1280维语义特征提取，匹配算法修复（纯余弦相似度+阈值0.90），状态机bug修复，Web实时预览调试功能。
 
 ---
 
@@ -8,8 +8,9 @@
 
 - 🆔 **Tag ID 标识** ⭐v3.2：16位十六进制唯一标识（`0x0001`-`0xFFFF`，支持65,535个资产）
 - ✅ **验证式更新** ⭐v3.2：Tag ID已存在时，拍摄正视图进行身份验证后方可累加数量
-- 🔍 **混合相似度验证**：余弦+欧氏距离加权评估，阈值默认0.75
-- 🎯 **智能识别**：MobileNetV2特征提取 + 多帧融合 + 模糊度检测
+- 🔍 **纯余弦相似度验证** ⭐v3.5：移除无效的Euclidean混合，统一阈值0.90，区分度显著提升
+- 🎯 **智能识别** ⭐v3.5：MobileNetV2 GAP 1280维语义特征提取 + 自适应帧数（1-3帧）+ 模糊度检测
+- ⚡ **极速推理** ⭐v3.5：三视图全流程从30-60s降至8.5s（降低80-85%），移除800ms人为延迟
 - 📊 **三视图分析**：正面/侧面/顶部加权综合置信度评估
 - 🔀 **双线程架构**：拍摄与推理分离，响应速度提升37倍
 - 💾 **TF卡存储**：完整资产管理（名称、区域、数量）
@@ -19,6 +20,7 @@
 - 📡 **WS63协议**：UART1 JSON通信，支持远程调度（v3.0）
 - 📶 **L610 4G模块**：MQTT云端通信 + 主动上报机制（v3.1）
 - 🏗️ **业务执行器架构** ⭐v3.4：business_executor 统一处理业务逻辑，双通道输出（CLI文本/JSON协议）
+- 🌐 **Web实时预览** ⭐v3.5：WiFi SoftAP + MJPEG流 + 系统状态面板（调试用，实际演示不需要）
 
 ---
 
@@ -87,12 +89,13 @@ idf.py flash monitor
 
 ### 2. 资产盘点（Inventory）
 
-**流程**：拍摄三视图 → 多帧融合 → 特征匹配 → 返回置信度
+**流程**：拍摄三视图 → 自适应帧数融合 → GAP特征匹配 → 返回置信度
 
-**特点**：
-- 每帧采集3张图像进行融合
-- 拉普拉斯方差算法过滤模糊图像
-- 混合相似度算法（余弦+欧氏距离）
+**特点** ⭐v3.5：
+- **自适应帧数**：默认每视图1帧，边缘情况自动补充至3帧（blur_score ∈ [12.5, 37.5]）
+- **GAP 1280维特征**：替代1000维分类logits，语义表达能力更强
+- **拉普拉斯方差算法**：降采样2×（160×120）过滤模糊图像，速度提升4倍
+- **纯余弦相似度**：移除无效的Euclidean混合，阈值统一提升至0.90
 
 ### 3. 出库核验（Outbound）
 
@@ -234,7 +237,7 @@ L610模块可主动向WS63上报事件：
 
 ### AT指令透传（调试用）
 
-```json
+``json
 {"cmd": "l610_at", "at": "AT+CSQ"}
 ```
 
@@ -246,6 +249,45 @@ L610模块可主动向WS63上报事件：
 **详细协议和调试指南**：
 - 协议规范：[docs/PROTOCOL.md](docs/PROTOCOL.md) §第11-19章
 - 调试指南：[docs/L610_DEBUG_GUIDE.md](docs/L610_DEBUG_GUIDE.md)
+
+---
+
+## 🌐 Web实时预览（调试用，v3.5）
+
+> **重要说明**：Web实时流仅用于调试和拍摄辅助，实际演示不需要。赛题要求WS63做AP/Host，ESP32不能做AP。
+
+### 功能概述
+
+1. **MJPEG实时画面** — 浏览器中查看摄像头实时流（8-12fps）
+2. **系统状态面板** — 实时显示堆内存、摄像头状态、存储状态、BE状态、当前Tag ID、WiFi客户端数
+3. **FST三视图浏览** — 浏览SD卡中已保存的Front/Side/Top三视图JPEG帧图片
+
+### 使用方法
+
+1. **连接WiFi**：搜索`ESP32-CAM-AI`开放网络（无密码）
+2. **访问页面**：浏览器打开`http://192.168.4.1`
+3. **实时预览**：左侧查看摄像头画面，右侧查看系统状态，底部浏览已保存资产
+
+### HTTP API端点
+
+| 方法 | 端点 | Content-Type | 说明 |
+|------|------|-------------|------|
+| GET | `/` | text/html | 主页（SPIFFS） |
+| GET | `/stream` | multipart/x-mixed-replace | MJPEG实时视频流 |
+| GET | `/api/status` | application/json | 系统运行状态 |
+| GET | `/api/snapshot` | image/jpeg | 单帧JPEG快照 |
+| GET | `/api/frames?tag_id=X` | application/json | 指定资产三视图信息 |
+| GET | `/api/image?tag_id=X&view=Y` | image/jpeg | 从SD卡提供JPEG文件 |
+| GET | `/api/assets` | application/json | 已注册资产列表 |
+
+### 技术实现
+
+- **WiFi模式**: SoftAP, SSID: `ESP32-CAM-AI`, IP: 192.168.4.1
+- **互斥锁机制**: AI管道优先级7 > HTTP服务器优先级5，100ms超时保证AI总能抢占摄像头
+- **时序分离**: WiFi在SD卡、模型、摄像头全部初始化完毕3秒后才启动，避免PSRAM DMA竞争
+- **分区调整**: factory 6M→7M（固件膨胀70KB），storage 2M→1M（前端仅~10KB）
+
+**详细实施报告**：[docs/archive/20260609_WEB_LIVE_PREVIEW.md](docs/archive/20260609_WEB_LIVE_PREVIEW.md)
 
 ---
 
@@ -299,15 +341,20 @@ main/
 
 ## 📊 性能指标
 
-| 指标 | 数值 | 说明 |
-|------|------|------|
-| 单次拍摄时间 | ~800ms | 包含3帧采集 |
-| 特征提取时间 | ~1.2s | MobileNetV2推理 |
-| 相似度计算 | <10ms | 1280维向量对比 |
-| 验证式更新 | ~2.5s | 仅需正视图（vs 完整注册7.5s） |
-| 识别准确率 | ≥92% | 良好光照条件下 |
-| Heap空闲内存 | >50KB | 避免碎片化 |
-| TF卡容量 | 7.5GB | 典型8GB卡可用空间 |
+| 指标 | v3.4 | v3.5 | 说明 |
+|------|------|------|------|
+| 三视图推理时间 | 30-60s | **~8.5s** | ⭐降低80-85% |
+| 每视图帧数 | 3帧固定 | 1帧（边缘3帧） | ⭐自适应策略 |
+| 特征维度 | 1000 logits | **1280 GAP** | ⭐语义特征 |
+| 同物品cosine | ~1.0 (bug) | **>0.85** | ⭐修复覆盖bug |
+| 异物品cosine | ~1.0 (bug) | **0.55-0.65** | ⭐区分度提升 |
+| 匹配算法 | 70%cosine+30%euclidean | **100% cosine** | ⭐简化有效 |
+| 匹配阈值 | 0.70-0.85 | **0.90** | ⭐统一提升 |
+| 单次拍摄时间 | ~800ms | ~600ms | 模糊检测降采样 |
+| 特征提取时间 | ~1.2s | ~0.9s | 移除冗余计算 |
+| 相似度计算 | <10ms | <10ms | 纯余弦更高效 |
+| Heap空闲内存 | >50KB | >50KB | 缓冲区复用减少碎片 |
+| TF卡容量 | 7.5GB | 7.5GB | 典型8GB卡可用空间 |
 
 ---
 
@@ -325,6 +372,7 @@ main/
 
 ## 🔄 版本历史
 
+- **v3.5** (2026-06-09): ⭐ 性能优化 + 稳定性增强（AI推理速度提升80-85%，GAP 1280维特征提取，匹配算法修复为纯余弦+阈值0.90，状态机复位bug修复，Web实时预览调试功能）
 - **v3.4** (2026-06-05): ⭐ 架构重构 + GPIO 迁移（引入 business_executor 业务执行器，UART 处理器重构，GPIO17/18→47/21 解决摄像头冲突，outbound 分步控制，TX 诊断日志，step 动态化，补全 ping/sys_info/list_assets_page/get_asset 命令）
 - **v3.3** (2026-05-26): ⭐ 协议命令补全 + Tag ID 适配（delete/get_asset 改用 tag_id 字段，移除状态限制）
 - **v3.2** (2026-05-19): ⭐ Tag ID 改造（MAC地址→16位Tag ID，验证式数量累加，混合相似度验证）
@@ -338,7 +386,14 @@ main/
 
 ## 📞 技术支持
 
-- **问题反馈**: [GitHub Issues](https://github.com/your-repo/CAM_AI/issues)
+- **远程仓库**: 
+  - GitHub: [ESP32-S3_MobileNetV2-OV5640](https://github.com/TachengXiaochen/ESP32-S3_MobileNetV2-OV5640)
+  - Gitee镜像: [ESP32-S3_MobileNetV2-OV5640](https://gitee.com/star-flash-smart-inventory/ESP32-S3_MobileNetV2-OV5640)
+- **项目主页**: [星闪智能盘点系统](https://gitee.com/star-flash-smart-inventory)
+- **WS63端仓库**: [ws63_bs2x_sle_project](https://gitee.com/star-flash-smart-inventory/ws63_bs2x_sle_project) (主要负责人)
+- **问题反馈**: 
+  - GitHub Issues: [GitHub Issues](https://github.com/TachengXiaochen/ESP32-S3_MobileNetV2-OV5640/issues)
+  - Gitee Issues: [Gitee Issues](https://gitee.com/star-flash-smart-inventory/ESP32-S3_MobileNetV2-OV5640/issues)
 - **技术文档**: [docs/](docs/) 目录
 - **邮箱**: 202500201056@stumail.sztu.edu.cn
 
@@ -346,4 +401,4 @@ main/
 
 **许可证**: MIT  
 **维护者**: TcXc  
-**最后更新**: 2026-06-05
+**最后更新**: 2026-06-09

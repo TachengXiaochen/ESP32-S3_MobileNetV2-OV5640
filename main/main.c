@@ -20,15 +20,17 @@
 #include "sdkconfig.h"
 
 #include "modules/camera/camera_module.h"
-#include "modules/system/storage_module.h"
+#include "modules/system/storage/storage_module.h"
 #include "modules/ai/ai_module.h"
-#include "modules/system/asset_manager.h"
-#include "modules/system/led_indicator.h"
-#include "modules/system/verify_handler.h"
+#include "modules/system/storage/asset_manager.h"
+#include "modules/system/led/led_indicator.h"
+#include "modules/system/verify/verify_handler.h"
 #include "modules/ai/feature_processor.h"
-#include "modules/system/business_executor.h"
-#include "modules/system/uart_handler_0.h"
-#include "modules/system/uart_handler_1.h"
+#include "modules/ai/blur_detection.h"
+#include "modules/system/executor/business_executor.h"
+#include "modules/web/web_server.h"
+#include "modules/system/comm/uart_handler_0.h"
+#include "modules/system/comm/uart_handler_1.h"
 #include "modules/4g/l610_manager.h"
 #include "main.h"
 
@@ -52,6 +54,9 @@ bool g_storage_ready = false;
 float g_front_feature[FEATURE_VEC_SIZE] = {0};
 float g_side_feature[FEATURE_VEC_SIZE] = {0};
 float g_top_feature[FEATURE_VEC_SIZE] = {0};
+float g_stored_front_feature[FEATURE_VEC_SIZE] = {0};
+float g_stored_side_feature[FEATURE_VEC_SIZE] = {0};
+float g_stored_top_feature[FEATURE_VEC_SIZE] = {0};
 inventory_state_t g_inventory_state = INVENTORY_IDLE;
 int g_views_enqueued = 0;
 int g_views_processed = 0;
@@ -306,7 +311,7 @@ static void inference_task(void *pvParameters)
 {
     esp_task_wdt_add(NULL);
     inference_job_t job;
-    const int NUM_FRAMES = 3;
+    const int MAX_FRAMES = 3;              // 边缘情况下最多采3帧（正常1帧）
     while (1) {
         if (xQueueReceive(xInferenceQueue, &job, pdMS_TO_TICKS(2000))) {
             SAFE_WDT_RESET();
@@ -315,19 +320,51 @@ static void inference_task(void *pvParameters)
             else if (job.view_cmd == CMD_CAPTURE_SIDE) { fp = g_side_feature; vn = "Side"; }
             else { fp = g_top_feature; vn = "Top"; }
             ESP_LOGI(TAG, "[INF] %s start", vn);
-            feature_processor_clear_buffer();
+
+            // 自适应帧数：默认1帧，边缘清晰度时补充到最多3帧
+            feature_processor_reset_frame_count();
             int fc = 0;
-            for (int i = 0; i < NUM_FRAMES; i++) {
-                if (xSemaphoreTake(xCameraMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-                    float sf[FEATURE_VEC_SIZE];
-                    if (camera_module_capture_and_process(sf, FEATURE_VEC_SIZE)) { feature_processor_add_frame(sf, FEATURE_VEC_SIZE); fc++; }
-                    xSemaphoreGive(xCameraMutex);
+            float blur_var = 0.0f;
+            bool need_more = false;
+
+            // --- 第1帧 ---
+            if (xSemaphoreTake(xCameraMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+                float sf[FEATURE_VEC_SIZE];
+                if (camera_module_capture_and_process(sf, FEATURE_VEC_SIZE, &blur_var)) {
+                    feature_processor_add_frame(sf, FEATURE_VEC_SIZE);
+                    fc++;
+                    // 判断清晰度：边缘 → 需要补充帧
+                    if (blur_var < BLUR_CONFIDENT_THRESHOLD) {
+                        need_more = true;
+                        ESP_LOGI(TAG, "[INF] %s blur=%.1f marginal, supplementing", vn, (double)blur_var);
+                    } else {
+                        ESP_LOGI(TAG, "[INF] %s blur=%.1f confident, 1 frame OK", vn, (double)blur_var);
+                    }
                 }
-                esp_task_wdt_reset();
+                xSemaphoreGive(xCameraMutex);
             }
+            esp_task_wdt_reset();
+
+            // --- 补充帧（仅边缘情况） ---
+            if (need_more) {
+                for (int i = 1; i < MAX_FRAMES && fc < MAX_FRAMES; i++) {
+                    if (xSemaphoreTake(xCameraMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+                        float sf[FEATURE_VEC_SIZE];
+                        if (camera_module_capture_and_process(sf, FEATURE_VEC_SIZE, NULL)) {
+                            feature_processor_add_frame(sf, FEATURE_VEC_SIZE);
+                            fc++;
+                        }
+                        xSemaphoreGive(xCameraMutex);
+                    }
+                    esp_task_wdt_reset();
+                }
+            }
+
+            // --- 融合输出 ---
             if (fc > 0 && feature_processor_get_fused_feature(fp, FEATURE_VEC_SIZE))
                 ESP_LOGI(TAG, "[INF] %s fusion %d frames", vn, fc);
             else ESP_LOGW(TAG, "[INF] %s no frames", vn);
+
             g_views_processed++;
             if (g_views_processed >= g_total_views) {
                 system_msg_t tm = {0}; tm.cmd = CMD_INFERENCE_TRIGGER;
@@ -405,8 +442,16 @@ void app_main(void)
     // ⭐ 任务创建完毕后才启用 UART（UART ISR 不再抢占）
     uart_handler_0_init();
     uart_handler_1_init();
+
+    // ⚠️ 延迟3秒确保SD卡DMA、PSRAM完全释放后再启动WiFi
+    vTaskDelay(pdMS_TO_TICKS(3000));
+    ESP_LOGI(TAG, "Starting web server (delayed init)...");
+    web_server_init();
+
+    // WiFi 就绪后再初始化 L610（避免L610 AT超时阻塞Web预览）
     ret = l610_manager_init();
     if (ret == ESP_OK) { ret = l610_manager_start(); if (ret == ESP_OK) ESP_LOGI(TAG, "L610 OK"); else ESP_LOGW(TAG, "L610 start fail"); }
     else ESP_LOGW(TAG, "L610 init fail");
+
     while (1) { vTaskDelay(pdMS_TO_TICKS(1000)); }
 }

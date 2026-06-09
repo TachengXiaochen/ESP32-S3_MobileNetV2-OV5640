@@ -278,6 +278,21 @@ public:
                      std::map<std::string, TensorBase *> user_outputs = {});
 
     /**
+     * @brief Execute the model until the specified module index (inclusive).
+     * Used to extract intermediate layer features before memory reuse.
+     * @param target_module_index Index of the target module in m_execution_plan.
+     * @param mode Execution mode.
+     */
+    void run_until(int target_module_index, runtime_mode_t mode = RUNTIME_MODE_SINGLE_CORE);
+
+    /**
+     * @brief Continue execution from the module after the specified index.
+     * @param start_module_index The index of the module after which to continue.
+     * @param mode Execution mode.
+     */
+    void run_from(int start_module_index, runtime_mode_t mode = RUNTIME_MODE_SINGLE_CORE);
+
+    /**
      * @brief Minimize the model.
      */
     void minimize();

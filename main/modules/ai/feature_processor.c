@@ -222,6 +222,13 @@ void feature_processor_clear_buffer(void)
     ESP_LOGI(TAG, "Frame buffer cleared");
 }
 
+void feature_processor_reset_frame_count(void)
+{
+    if (!g_initialized) return;
+    g_processor.frame_count = 0;
+    ESP_LOGI(TAG, "Frame count reset (buffer kept)");
+}
+
 bool feature_processor_normalize(const float *feature, int feature_size, float *output)
 {
     if (!feature || !output || feature_size <= 0) {

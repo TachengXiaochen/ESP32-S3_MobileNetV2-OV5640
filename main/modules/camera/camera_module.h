@@ -15,9 +15,10 @@ bool camera_module_init(void);
  * @brief 采集图像并提取特征向量
  * @param feature_out 输出特征向量缓冲区
  * @param feature_size 特征向量大小
+ * @param blur_score 可选输出，返回当前帧的Laplacian模糊方差（传NULL忽略）
  * @return true 成功, false 失败
  */
-bool camera_module_capture_and_process(float *feature_out, int feature_size);
+bool camera_module_capture_and_process(float *feature_out, int feature_size, float *blur_score);
 
 /**
  * @brief 采集原始JPEG图像数据（用于保存）

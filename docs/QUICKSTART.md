@@ -1,4 +1,4 @@
-# ESP32-S3 CAM AI - 快速开始指南 v3.4
+# ESP32-S3 CAM AI - 快速开始指南 v3.5
 
 ## ⚠️ 重要提示：ESP-IDF版本要求
 
@@ -20,6 +20,9 @@ idf.py --version
 基于 **ESP32-S3 + MobileNetV2** 的智能资产管理系统，支持：
 - ✅ **🆔 Tag ID标识** ⭐v3.2：16位十六进制唯一标识（0x0001-0xFFFF）
 - ✅ **✅ 验证式更新** ⭐v3.2：Tag ID已存在时验证身份后累加数量
+- ✅ **⚡ 极速推理** ⭐v3.5：三视图全流程从30-60s降至8.5s（降低80-85%）
+- ✅ **🎯 GAP 1280维特征** ⭐v3.5：替代1000维logits，语义表达能力更强
+- ✅ **🔍 纯余弦相似度** ⭐v3.5：移除无效Euclidean混合，阈值统一0.90
 - ✅ **🚪 出库模式（分步控制）** ⭐v3.4：按需初始化硬件，用户确认后再拍照
 - ✅ **📋 资产详细信息** ⭐v2.5：物品名称、存放区域、数量完整管理
 - ✅ **🔀 双线程架构** ⭐v2.5：拍摄与推理分离，响应速度提升37倍
@@ -28,6 +31,19 @@ idf.py --version
 - ✅ **智能置信度分析**
 - ✅ **TF卡存储**（唯一模式）
 - ✅ **模块化多任务架构**
+
+**维护者**: TcXc  
+**远程仓库**: 
+- GitHub: [ESP32-S3_MobileNetV2-OV5640](https://github.com/TachengXiaochen/ESP32-S3_MobileNetV2-OV5640)
+- Gitee镜像: [ESP32-S3_MobileNetV2-OV5640](https://gitee.com/star-flash-smart-inventory/ESP32-S3_MobileNetV2-OV5640)
+**项目主页**: [星闪智能盘点系统](https://gitee.com/star-flash-smart-inventory)  
+**WS63端仓库**: [ws63_bs2x_sle_project](https://gitee.com/star-flash-smart-inventory/ws63_bs2x_sle_project) (主要负责人)  
+**问题反馈**: 
+- GitHub Issues: [GitHub Issues](https://github.com/TachengXiaochen/ESP32-S3_MobileNetV2-OV5640/issues)
+- Gitee Issues: [Gitee Issues](https://gitee.com/star-flash-smart-inventory/ESP32-S3_MobileNetV2-OV5640/issues)  
+**反馈邮箱**: 202500201056@stumail.sztu.edu.cn  
+
+**祝你使用愉快！** 🎉
 
 ---
 
@@ -230,76 +246,19 @@ help  # 查看所有可用命令
 
 ## 📊 性能指标
 
-| 指标 | V2.4数值 | V2.5数值 | 备注 |
+| 指标 | v3.4数值 | v3.5数值 | 备注 |
 |------|---------|-----------|------|
-| **单次推理时间** | ~2.5秒 | ~2.5秒 | MobileNetV2推理 |
-| **完整盘点耗时** | ~25秒 | ~25秒 | 三视图×3帧 |
+| **三视图推理时间** | ~30-60秒 | **~8.5秒** | ⭐ **降低80-85%** |
+| **每视图帧数** | 3帧固定 | 1帧（边缘3帧） | ⭐ **自适应策略** |
+| **特征维度** | 1000 logits | **1280 GAP** | ⭐ **语义特征** |
+| **同物品cosine** | ~1.0 (bug) | **>0.85** | ⭐ **修复覆盖bug** |
+| **异物品cosine** | ~1.0 (bug) | **0.55-0.65** | ⭐ **区分度提升** |
+| **匹配算法** | 70%cosine+30%euclidean | **100% cosine** | ⭐ **简化有效** |
+| **匹配阈值** | 0.70-0.85 | **0.90** | ⭐ **统一提升** |
+| **单次拍摄时间** | ~800ms | ~600ms | 模糊检测降采样 |
+| **特征提取时间** | ~1.2s | ~0.9s | 移除冗余计算 |
+| **相似度计算** | <10ms | <10ms | 纯余弦更高效 |
 | **出库完整流程** | ❌ 不支持 | **~7.5秒** | ⭐ **新功能** |
 | **拍摄反馈延迟** | ~7.5秒 | **~200ms** | ⭐ **37倍提升** |
-| **特征向量维度** | 1280 | 1280 | MobileNetV2输出 |
-| **识别准确率** | >95% | >95% | 加权综合+多帧融合 |
 | **内存占用** | ~4MB | ~4MB | PSRAM使用 |
 | **TF卡写入速度** | ~500KB/s | ~500KB/s | 取决于TF卡等级 |
-
----
-
-## ❓ 常见问题
-
-### Q1: 编译失败怎么办？
-```bash
-# 执行完全清理后重新编译
-idf.py fullclean
-idf.py build
-```
-
-### Q2: MAC地址输入无响应？
-- 确认波特率为 **115200**
-- 勾选串口助手的 **"发送新行"** 选项
-- 检查TX/RX接线是否正确
-
-### Q3: 摄像头初始化失败？
-- 确认使用 **OV5640** 型号
-- 检查GPIO接线（XCLK=15, SIOD=4, SIOC=5等）
-- 查看日志中的 `Camera PID` 是否为 `0x5640`
-
-### Q4: TF卡挂载失败？
-- **确认TF卡已正确插入卡槽**
-- 确认TF卡为 **FAT32** 格式
-- 检查GPIO 39/38/40 接线
-- 尝试更换TF卡（部分高速卡不兼容）
-- 查看串口日志中的具体错误代码
-
-### Q5: 出现LoadProhibited崩溃？
-在 `idf.py menuconfig` 中降低PSRAM频率：
-```
-Component config → ESP PSRAM → SPI RAM speed → 40MHz
-```
-
-### Q6: 出库模式如何使用？（V2.5新增）
-- 输入 `o` 进入出库模式
-- 仅适用于已注册的资产
-- 仅需拍摄正视图进行快速比对
-- 系统自动更新库存数量
-- 数量归零时资产将被自动删除
-
-### Q7: 为什么列表显示的资产信息不完整？（V2.5新增）
-- 旧版本注册的资产可能缺少详细信息
-- 建议重新注册以获得完整信息（名称、区域、数量）
-- 新版本会自动迁移旧格式数据（填充默认值）
-
-详细排错请查看 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)
-
----
-
-## 📚 下一步
-
-- 📖 阅读 [USER_GUIDE.md](USER_GUIDE.md) 了解完整功能
-- 🏗️ 查看 [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md) 了解技术架构
-- 🛠️ 参考 [BUILD_CHEATSHEET.md](BUILD_CHEATSHEET.md) 掌握编译技巧
-
----
-
-**维护者**: TcXc  
-**反馈邮箱**: 202500201056@stumail.sztu.edu.cn  
-
-**祝你使用愉快！** 🎉

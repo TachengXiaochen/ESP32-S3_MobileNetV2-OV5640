@@ -3,8 +3,8 @@
 #include <math.h>
 #include "esp_log.h"
 #include "verify_handler.h"
-#include "../ai/similarity_matcher.h"
-#include "../ai/ai_module.h"
+#include "modules/ai/similarity_matcher.h"
+#include "modules/ai/ai_module.h"
 
 static const char *TAG = "verify_handler";
 

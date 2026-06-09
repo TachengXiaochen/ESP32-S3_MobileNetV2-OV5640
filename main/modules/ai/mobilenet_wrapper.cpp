@@ -3,7 +3,10 @@
 #include "esp_camera.h"
 #include "esp_task_wdt.h"  // 看门狗复位函数
 #include "dl_image.hpp"
+#include "dl_cls_base.hpp"
+#include "dl_tensor_base.hpp"
 #include "imagenet_cls.hpp"
+#include "fbs_model.hpp"
 #include "feature_processor.h"  // 温度缩放功能
 #include "blur_detection.h"    // 模糊度检测
 #include <cstring>
@@ -14,6 +17,47 @@ static const char *TAG = "mobilenet_wrapper";
 // MobileNetV2模型实例
 static ImageNetCls *g_mobilenet_model = nullptr;
 
+// GAP（Global Average Pooling）中间层 — 1280 维语义特征
+static std::string g_gap_tensor_name;
+static std::vector<int> g_gap_shape;
+static int g_gap_module_index = -1;  // -1 = 未发现，>=0 = 在 m_execution_plan 中的索引
+
+/**
+ * @brief 遍历模型节点，找到 GlobalAveragePool 操作的输出张量
+ */
+static bool discover_gap_tensor(dl::Model *model)
+{
+    auto *fbs = model->get_fbs_model();
+    fbs->load_map();  // build() 后映射表已被 clear_map() 清空，需重建
+    auto nodes = fbs->topological_sort();
+    bool found = false;
+    for (int i = 0; i < (int)nodes.size(); i++) {
+        if (fbs->get_operation_type(nodes[i]) == "GlobalAveragePool") {
+            std::vector<std::string> inputs, outputs;
+            fbs->get_operation_inputs_and_outputs(nodes[i], inputs, outputs);
+            if (!outputs.empty()) {
+                g_gap_tensor_name = outputs[0];
+                g_gap_module_index = i;  // 拓扑排序索引 = 执行计划索引
+                g_gap_shape = fbs->get_tensor_shape(g_gap_tensor_name);
+                if (g_gap_shape.empty()) {
+                    // 中间张量不在 FlatBuffers initializers 中，使用标准 MobileNetV2 GAP 输出
+                    g_gap_shape = {1, 1280};
+                }
+                ESP_LOGI(TAG, "GAP tensor discovered: module_idx=%d, tensor=%s, size=%d",
+                         g_gap_module_index, g_gap_tensor_name.c_str(),
+                         g_gap_shape.empty() ? 0 : g_gap_shape.back());
+                found = true;
+            }
+            break;
+        }
+    }
+    fbs->clear_map();  // 释放映射表内存
+    if (!found) {
+        ESP_LOGW(TAG, "GlobalAveragePool layer not found, falling back to graph output");
+    }
+    return found;
+}
+
 extern "C" bool mobilenet_init(void)
 {
     ESP_LOGI(TAG, "Initializing MobileNetV2 model...");
@@ -22,11 +66,18 @@ extern "C" bool mobilenet_init(void)
         ESP_LOGE(TAG, "Failed to create MobileNetV2 model");
         return false;
     }
+
+    // 发现 GAP 中间层（1280 维语义特征，优于 1000 维分类 logits）
+    dl::Model *model = g_mobilenet_model->get_raw_model();
+    if (model) {
+        discover_gap_tensor(model);
+    }
+
     ESP_LOGI(TAG, "MobileNetV2 model initialized");
     return true;
 }
 
-extern "C" bool mobilenet_extract_features(float *feature_vec, int feature_size)
+extern "C" bool mobilenet_extract_features(float *feature_vec, int feature_size, float *blur_score)
 {
     ESP_LOGI(TAG, "Starting MobileNetV2 feature extraction...");
 
@@ -104,10 +155,16 @@ extern "C" bool mobilenet_extract_features(float *feature_vec, int feature_size)
         .height = input_img.height,
         .channels = 3  // RGB888
     };
-    
+
+    // 计算模糊方差（用于自适应帧数决策）
+    float variance = blur_detect_laplacian_variance(&img_for_blur_detect);
+    if (blur_score) {
+        *blur_score = variance;
+    }
+    ESP_LOGI(TAG, "Blur variance: %.2f", (double)variance);
+
     if (!blur_detect_is_sharp_default(&img_for_blur_detect)) {
         ESP_LOGW(TAG, "Image is too blurry, discarding frame");
-        // 释放JPEG解码内存
         free(input_img.data);
         esp_camera_fb_return(fb);
         return false;
@@ -117,42 +174,74 @@ extern "C" bool mobilenet_extract_features(float *feature_vec, int feature_size)
 
     ESP_LOGI(TAG, "Running MobileNetV2 inference...");
 
-    // 运行模型推理
-    auto results = g_mobilenet_model->run(input_img);
+    dl::TensorBase *output_tensor = nullptr;
+    int feat_len = 0;
 
-    if (results.empty()) {
-        ESP_LOGE(TAG, "Model inference failed");
-        // ✅ 释放JPEG解码内存
-        free(input_img.data);
-        esp_camera_fb_return(fb);
-        return false;
+    if (g_gap_module_index >= 0) {
+        // === 路径 A: 分步执行提取 GAP 中间层 1280 维语义特征 ===
+        auto *preprocessor = g_mobilenet_model->get_image_preprocessor();
+        preprocessor->preprocess(input_img);
+
+        // Step 1: 执行到 GAP 模块（含），此时 GAP 输出在共享 buffer 中尚未被复用
+        model->run_until(g_gap_module_index);
+
+        // Step 2: 深拷贝 GAP 特征（run_from 之后内存会被后续模块复用）
+        dl::TensorBase *gap_tensor = model->get_intermediate(g_gap_tensor_name);
+        if (!gap_tensor) {
+            ESP_LOGE(TAG, "Failed to get GAP intermediate tensor");
+            free(input_img.data);
+            esp_camera_fb_return(fb);
+            return false;
+        }
+
+        output_tensor = gap_tensor;
+        feat_len = output_tensor->get_size();
+
+        // === GAP 诊断日志 ===
+        ESP_LOGI(TAG, "GAP DIAG: dtype=%d exponent=%d size=%d data=%p",
+                 (int)output_tensor->get_dtype(), output_tensor->get_exponent(),
+                 output_tensor->get_size(), output_tensor->get_element_ptr());
+        if (output_tensor->get_dtype() == dl::DATA_TYPE_INT8) {
+            int8_t *raw = (int8_t *)output_tensor->get_element_ptr();
+            ESP_LOGI(TAG, "GAP DIAG raw[0..9]: %d %d %d %d %d %d %d %d %d %d",
+                     raw[0], raw[1], raw[2], raw[3], raw[4],
+                     raw[5], raw[6], raw[7], raw[8], raw[9]);
+        }
+        // === GAP 诊断日志结束 ===
+        ESP_LOGI(TAG, "Feature vector length (GAP): %d", feat_len);
+
+        // Step 3: 继续执行剩余模块
+        model->run_from(g_gap_module_index);
+    } else {
+        // === 路径 B: 回退 — 使用图输出（1000 维分类 logits） ===
+        auto results = g_mobilenet_model->run(input_img);
+
+        if (results.empty()) {
+            ESP_LOGE(TAG, "Model inference failed");
+            free(input_img.data);
+            esp_camera_fb_return(fb);
+            return false;
+        }
+
+        std::map<std::string, dl::TensorBase *> outputs = model->get_outputs();
+        if (outputs.empty()) {
+            ESP_LOGE(TAG, "No model outputs available");
+            free(input_img.data);
+            esp_camera_fb_return(fb);
+            return false;
+        }
+
+        output_tensor = outputs.begin()->second;
+        if (!output_tensor) {
+            ESP_LOGE(TAG, "Output tensor is null");
+            free(input_img.data);
+            esp_camera_fb_return(fb);
+            return false;
+        }
+        feat_len = output_tensor->get_size();
+        ESP_LOGI(TAG, "Feature vector length (logits): %d", feat_len);
+        outputs.clear();
     }
-
-    // 获取模型的最后一层输出作为特征向量
-    std::map<std::string, dl::TensorBase *> outputs = model->get_outputs();
-
-    if (outputs.empty()) {
-        ESP_LOGE(TAG, "No model outputs available");
-        // ✅ 释放JPEG解码内存
-        free(input_img.data);
-        esp_camera_fb_return(fb);
-        return false;
-    }
-
-    // 获取第一个输出（通常是softmax之前的logits或全局平均池化后的特征）
-    auto output_iter = outputs.begin();
-    dl::TensorBase *output_tensor = output_iter->second;
-
-    if (!output_tensor) {
-        ESP_LOGE(TAG, "Output tensor is null");
-        // ✅ 释放JPEG解码内存
-        free(input_img.data);
-        esp_camera_fb_return(fb);
-        return false;
-    }
-
-    int feat_len = output_tensor->get_size();
-    ESP_LOGI(TAG, "Feature vector length: %d", feat_len);
 
     // 确保特征向量长度不超过目标大小
     if (feat_len > feature_size) {
@@ -183,42 +272,12 @@ extern "C" bool mobilenet_extract_features(float *feature_vec, int feature_size)
     // ✅ 反量化完成后复位看门狗
     esp_task_wdt_reset();
 
-    // L2归一化特征向量（用于余弦相似度计算）
-    float norm = 0.0f;
-    for (int i = 0; i < feat_len; i++) {
-        norm += feature_vec[i] * feature_vec[i];
-    }
-    norm = sqrtf(norm);
-
-    if (norm > 1e-6f) {
-        for (int i = 0; i < feat_len; i++) {
-            feature_vec[i] /= norm;
-        }
-    }
-
-    // ✅ 新增：应用温度缩放增强区分度 (T=0.8)
-    extern bool feature_processor_temperature_scaling(const float *feature, int feature_size,
-                                                       float temperature, float *output);
-    float *scaled_features = (float *)malloc(feat_len * sizeof(float));
-    if (scaled_features && feature_processor_temperature_scaling(feature_vec, feat_len, 0.8f, scaled_features)) {
-        memcpy(feature_vec, scaled_features, sizeof(float) * feat_len);
-        ESP_LOGI(TAG, "Temperature scaling applied (T=0.8)");
-    } else {
-        ESP_LOGW(TAG, "Temperature scaling failed, using original features");
-    }
-    if (scaled_features) {
-        free(scaled_features);
-    }
-
-    // ✅ 归一化完成后复位看门狗
-    esp_task_wdt_reset();
-
     // 填充剩余部分为0
     for (int i = feat_len; i < feature_size; i++) {
         feature_vec[i] = 0.0f;
     }
 
-    ESP_LOGI(TAG, "Feature extraction completed: %d features, norm=%.4f", feat_len, norm);
+    ESP_LOGI(TAG, "Feature extraction completed: %d features", feat_len);
 
     // ✅ 关键修复：释放JPEG解码分配的内存
     if (input_img.data) {
@@ -226,9 +285,6 @@ extern "C" bool mobilenet_extract_features(float *feature_vec, int feature_size)
         input_img.data = nullptr;
     }
 
-    // 清除模型输出引用，防止悬空指针
-    outputs.clear();
-    
     esp_camera_fb_return(fb);
     
     // 【关键修复】强制触发一次堆管理器整理
@@ -239,15 +295,8 @@ extern "C" bool mobilenet_extract_features(float *feature_vec, int feature_size)
         free(heap_check);
     }
     
-    // 【关键修复】增加延迟时间,确保堆管理器完全稳定
-    // MobileNetV2推理后需要更长时间让TLSF堆元数据恢复
-    // 但在延迟期间必须定期复位看门狗,防止系统重启
-    
-    // 分段延迟,每200ms复位一次看门狗
-    for (int i = 0; i < 4; i++) {
-        vTaskDelay(pdMS_TO_TICKS(200));
-        esp_task_wdt_reset();  // 每200ms复位看门狗
-    }
+    // 强制上下文切换，让idle任务有机会整理堆
+    vTaskDelay(1);
 
     return true;
 }

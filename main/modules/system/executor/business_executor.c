@@ -11,32 +11,26 @@
 #include "cJSON.h"
 #include "main.h"
 #include "modules/ai/ai_module.h"
-#include "modules/system/asset_manager.h"
-#include "modules/system/tag_id_validator.h"
-#include "modules/system/verify_handler.h"
+#include "modules/system/storage/storage_module.h"
+#include "modules/system/verify/tag_id_validator.h"
+#include "modules/system/verify/verify_handler.h"
 
 static const char *TAG = "business_executor";
 
 // ========== 内部状态机 ==========
-typedef enum {
-    BE_STATE_IDLE,
-    BE_STATE_HARDWARE_INIT,
-    BE_STATE_WAITING_CAPTURE,
-    BE_STATE_CAPTURING,
-    BE_STATE_FINALIZING
-} be_state_t;
+// be_state_t 已移至 business_executor.h 公开
 
 static be_response_cb_t g_be_cb = NULL;
 static be_channel_t g_be_channel = BE_CHANNEL_UART1_JSON;
-static be_state_t g_be_state = BE_STATE_IDLE;
-static be_cmd_t g_be_task = BE_CMD_UNKNOWN;
+be_state_t g_be_state = BE_STATE_IDLE;
+be_cmd_t g_be_task = BE_CMD_UNKNOWN;
 
 // 任务上下文
-static char g_be_tag_id[TAG_ID_STR_LEN] = {0};
-static char g_be_item_name[128] = {0};
-static char g_be_storage_area = 'A';
-static uint32_t g_be_quantity = 0;
-static uint32_t g_be_remove_qty = 0;
+char g_be_tag_id[TAG_ID_STR_LEN] = {0};
+char g_be_item_name[128] = {0};
+char g_be_storage_area = 'A';
+uint32_t g_be_quantity = 0;
+uint32_t g_be_remove_qty = 0;
 static int g_be_total_views = 0;
 static int g_be_captured_views = 0;
 static bool g_be_is_verify_mode = false;
@@ -293,9 +287,9 @@ static esp_err_t be_handle_inventory(be_channel_t channel, const char *tag_id, c
         g_be_cb(channel, BE_EVT_ERROR, &err);
         return ESP_ERR_NOT_FOUND;
     }
-    memcpy(g_front_feature, record->front_feature, FEATURE_VEC_SIZE * sizeof(float));
-    memcpy(g_side_feature, record->side_feature, FEATURE_VEC_SIZE * sizeof(float));
-    memcpy(g_top_feature, record->top_feature, FEATURE_VEC_SIZE * sizeof(float));
+    memcpy(g_stored_front_feature, record->front_feature, FEATURE_VEC_SIZE * sizeof(float));
+    memcpy(g_stored_side_feature, record->side_feature, FEATURE_VEC_SIZE * sizeof(float));
+    memcpy(g_stored_top_feature, record->top_feature, FEATURE_VEC_SIZE * sizeof(float));
     strncpy(g_be_tag_id, normalized, sizeof(g_be_tag_id) - 1);
     strncpy(g_be_item_name, record->item_name, sizeof(g_be_item_name) - 1);
     g_be_storage_area = record->storage_area;
@@ -532,7 +526,11 @@ static esp_err_t be_handle_list_assets_page(be_channel_t channel, const char *pa
     if (page_size < 1) page_size = 6;
     if (page_size > 50) page_size = 50;
 
-    // 扫描 assets 目录，收集所有 .dat 文件
+    // ⭐ 扫描 assets 目录：先收集所有 tag_id（支持子目录+平铺兼容）
+    #define MAX_ASSETS_SCAN 200
+    char tag_ids[MAX_ASSETS_SCAN][TAG_ID_STR_LEN];
+    int total_count = 0;
+
     DIR *dir = opendir("/sdcard/assets");
     if (!dir) {
         be_error_info_t err = { .error_code = -1, .error_msg = "Storage not available" };
@@ -540,20 +538,45 @@ static esp_err_t be_handle_list_assets_page(be_channel_t channel, const char *pa
         return ESP_ERR_NOT_FOUND;
     }
 
-    // 先统计总数
-    int total_count = 0;
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
-        if (strstr(entry->d_name, ".dat")) total_count++;
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+
+        // 尝试作为子目录打开（Tag ID 格式的子文件夹）
+        char sub_path[320];
+        snprintf(sub_path, sizeof(sub_path), "/sdcard/assets/%.255s", entry->d_name);
+        DIR *sub = opendir(sub_path);
+        if (sub) {
+            struct dirent *se;
+            while ((se = readdir(sub)) != NULL && total_count < MAX_ASSETS_SCAN) {
+                if (strstr(se->d_name, ".dat")) {
+                    strncpy(tag_ids[total_count], se->d_name, TAG_ID_STR_LEN - 1);
+                    tag_ids[total_count][TAG_ID_STR_LEN - 1] = '\0';
+                    char *dot = strchr(tag_ids[total_count], '.');
+                    if (dot) *dot = '\0';
+                    total_count++;
+                }
+            }
+            closedir(sub);
+            continue;
+        }
+
+        // 旧格式平铺文件（向后兼容）
+        if (strstr(entry->d_name, ".dat") && total_count < MAX_ASSETS_SCAN) {
+            strncpy(tag_ids[total_count], entry->d_name, TAG_ID_STR_LEN - 1);
+            tag_ids[total_count][TAG_ID_STR_LEN - 1] = '\0';
+            char *dot = strchr(tag_ids[total_count], '.');
+            if (dot) *dot = '\0';
+            total_count++;
+        }
     }
-    rewinddir(dir);
+    closedir(dir);
 
     int total_pages = (total_count + page_size - 1) / page_size;
     if (total_pages < 1) total_pages = 1;
 
     // 计算偏移
     int skip = (page - 1) * page_size;
-    int idx = 0;
     int item_idx = 0;
 
     cJSON *resp = cJSON_CreateObject();
@@ -563,20 +586,10 @@ static esp_err_t be_handle_list_assets_page(be_channel_t channel, const char *pa
     cJSON_AddNumberToObject(resp, "total_count", total_count);
     cJSON *assets_arr = cJSON_AddArrayToObject(resp, "assets");
 
-    while ((entry = readdir(dir)) != NULL && item_idx < page_size) {
-        if (!strstr(entry->d_name, ".dat")) continue;
-        if (idx < skip) { idx++; continue; }
-        idx++;
-
-        // 从文件名提取 tag_id: "0x0001.dat" → "0x0001"
-        char tag_id[TAG_ID_STR_LEN] = {0};
-        strncpy(tag_id, entry->d_name, TAG_ID_STR_LEN - 1);
-        char *dot = strchr(tag_id, '.');
-        if (dot) *dot = '\0';
-
+    for (int i = skip; i < total_count && item_idx < page_size; i++) {
         asset_record_t *record = (asset_record_t *)malloc(sizeof(asset_record_t));
         if (!record) continue;
-        if (asset_load(tag_id, record) == ESP_OK && record->is_valid) {
+        if (asset_load(tag_ids[i], record) == ESP_OK && record->is_valid) {
             cJSON *item = cJSON_CreateObject();
             cJSON_AddStringToObject(item, "tag_id", record->tag_id);
             cJSON_AddStringToObject(item, "item_name", record->item_name);
@@ -588,7 +601,6 @@ static esp_err_t be_handle_list_assets_page(be_channel_t channel, const char *pa
         }
         free(record);
     }
-    closedir(dir);
 
     char *js = cJSON_PrintUnformatted(resp);
     cJSON_Delete(resp);
@@ -722,9 +734,9 @@ bool be_on_all_views_done(void)
         case BE_CMD_INVENTORY: {
             similarity_result_t front_result = {0}, side_result = {0}, top_result = {0};
             extern bool ai_module_match_features(const float *, const float *, int, asset_class_t, similarity_result_t *);
-            ai_module_match_features(g_front_feature, g_front_feature, FEATURE_VEC_SIZE, ASSET_CLASS_UNKNOWN, &front_result);
-            ai_module_match_features(g_side_feature, g_side_feature, FEATURE_VEC_SIZE, ASSET_CLASS_UNKNOWN, &side_result);
-            ai_module_match_features(g_top_feature, g_top_feature, FEATURE_VEC_SIZE, ASSET_CLASS_UNKNOWN, &top_result);
+            ai_module_match_features(g_front_feature, g_stored_front_feature, FEATURE_VEC_SIZE, ASSET_CLASS_UNKNOWN, &front_result);
+            ai_module_match_features(g_side_feature, g_stored_side_feature, FEATURE_VEC_SIZE, ASSET_CLASS_UNKNOWN, &side_result);
+            ai_module_match_features(g_top_feature, g_stored_top_feature, FEATURE_VEC_SIZE, ASSET_CLASS_UNKNOWN, &top_result);
             float weighted_conf = front_result.confidence * 0.5f + side_result.confidence * 0.3f + top_result.confidence * 0.2f;
             bool is_match = (weighted_conf >= front_result.match_threshold);
             be_task_done_t done = {0};
@@ -805,6 +817,12 @@ static void be_reset_state(void)
     g_be_total_views = 0;
     g_be_captured_views = 0;
     g_be_is_verify_mode = false;
+
+    // 复位 camera 状态到主菜单（与 system_shutdown_camera() 一致）
+    g_camera_state = CAM_STATE_WAITING_TAG_ID;
+    g_is_inventory_mode = false;
+    g_is_outbound_mode = false;
+    g_inventory_state = INVENTORY_IDLE;
 }
 
 void be_register_ws63_send_func(void (*func)(const char *))

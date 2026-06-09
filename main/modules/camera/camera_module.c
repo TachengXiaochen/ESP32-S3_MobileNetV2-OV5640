@@ -73,14 +73,13 @@ bool camera_module_init(void) {
     return true;
 }
 
-bool camera_module_capture_and_process(float *feature_out, int feature_size) {
+bool camera_module_capture_and_process(float *feature_out, int feature_size, float *blur_score) {
     if (!g_is_initialized) {
         ESP_LOGE(TAG, "Camera not initialized!");
         return false;
     }
-    
-    // 直接调用 mobilenet_wrapper 提供的接口
-    return mobilenet_extract_features(feature_out, feature_size);
+
+    return mobilenet_extract_features(feature_out, feature_size, blur_score);
 }
 
 bool camera_module_capture_jpeg(uint8_t **jpeg_buf, size_t *jpeg_len) {

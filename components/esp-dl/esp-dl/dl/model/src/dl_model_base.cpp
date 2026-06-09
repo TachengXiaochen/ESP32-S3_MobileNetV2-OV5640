@@ -302,6 +302,33 @@ void Model::run(std::map<std::string, TensorBase *> &user_inputs,
     return;
 }
 
+void Model::run_until(int target_module_index, runtime_mode_t mode)
+{
+    int end = (target_module_index + 1 < static_cast<int>(m_execution_plan.size()))
+                  ? target_module_index + 1
+                  : static_cast<int>(m_execution_plan.size());
+    for (int i = 0; i < end; i++) {
+        dl::module::Module *module = m_execution_plan[i];
+        if (module) {
+            module->forward(m_model_context, mode);
+        } else {
+            break;
+        }
+    }
+}
+
+void Model::run_from(int start_module_index, runtime_mode_t mode)
+{
+    for (int i = start_module_index + 1; i < static_cast<int>(m_execution_plan.size()); i++) {
+        dl::module::Module *module = m_execution_plan[i];
+        if (module) {
+            module->forward(m_model_context, mode);
+        } else {
+            break;
+        }
+    }
+}
+
 std::map<std::string, TensorBase *> &Model::get_inputs()
 {
     return m_inputs;

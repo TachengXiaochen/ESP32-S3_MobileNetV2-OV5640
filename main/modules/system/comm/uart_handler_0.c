@@ -10,9 +10,9 @@
 
 #include "uart_handler_0.h"
 #include "main.h"
-#include "modules/system/tag_id_validator.h"
-#include "modules/system/asset_manager.h"
-#include "modules/system/verify_handler.h"
+#include "modules/system/verify/tag_id_validator.h"
+#include "modules/system/storage/asset_manager.h"
+#include "modules/system/verify/verify_handler.h"
 #include "modules/camera/camera_module.h"
 #include "modules/ai/ai_module.h"
 
@@ -388,7 +388,7 @@ static void uart0_dispatch(const char *cmd_line)
             g_camera_state = CAM_STATE_WAITING_VERIFY_CAPTURE;
             if (xSemaphoreTake(xCameraMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
                 float verify_feature[FEATURE_VEC_SIZE] = {0};
-                if (camera_module_capture_and_process(verify_feature, FEATURE_VEC_SIZE)) {
+                if (camera_module_capture_and_process(verify_feature, FEATURE_VEC_SIZE, NULL)) {
                     verify_output_t output;
                     bool verify_ok = verify_handler_execute(&g_verify_ctx, verify_feature, 0, &output);
                     if (verify_ok && output.result == VERIFY_RESULT_MATCH) {
@@ -468,9 +468,9 @@ static void uart0_dispatch(const char *cmd_line)
         asset_record_t *record = (asset_record_t *)malloc(sizeof(asset_record_t));
         if (!record) return;
         if (asset_load(lookup_id, record) == ESP_OK) {
-            memcpy(g_front_feature, record->front_feature, FEATURE_VEC_SIZE * sizeof(float));
-            memcpy(g_side_feature, record->side_feature, FEATURE_VEC_SIZE * sizeof(float));
-            memcpy(g_top_feature, record->top_feature, FEATURE_VEC_SIZE * sizeof(float));
+            memcpy(g_stored_front_feature, record->front_feature, FEATURE_VEC_SIZE * sizeof(float));
+            memcpy(g_stored_side_feature, record->side_feature, FEATURE_VEC_SIZE * sizeof(float));
+            memcpy(g_stored_top_feature, record->top_feature, FEATURE_VEC_SIZE * sizeof(float));
             free(record);
             g_is_inventory_mode = true;
             g_total_views = 3;
@@ -484,6 +484,9 @@ static void uart0_dispatch(const char *cmd_line)
             init_msg.cmd = CMD_INIT_CAMERA;
             snprintf(init_msg.tag_id, sizeof(init_msg.tag_id), "%s", lookup_id);
             xQueueSend(xSystemQueue, &init_msg, portMAX_DELAY);
+            // 同步 business_executor 状态机，使 be_handle_capture() 接受 f/s/t 命令
+            g_be_state = BE_STATE_WAITING_CAPTURE;
+            g_be_task = BE_CMD_INVENTORY;
             show_inventory_step1(lookup_id);
             return;
         } else { free(record); uart_write_bytes(UART_NUM_0, "[ERROR] Asset not found.\r\n", 26); return; }
@@ -507,6 +510,11 @@ static void uart0_dispatch(const char *cmd_line)
                      lookup_id, record->item_name, (unsigned long)record->quantity);
             uart_write_bytes(UART_NUM_0, info_msg, strlen(info_msg));
             snprintf(g_current_tag_id, TAG_ID_STR_LEN, "%s", lookup_id);
+            // 保存资产上下文到 business_executor（be_on_all_views_done 需要）
+            snprintf(g_be_tag_id, sizeof(g_be_tag_id), "%s", lookup_id);
+            snprintf(g_be_item_name, sizeof(g_be_item_name), "%s", record->item_name);
+            g_be_storage_area = record->storage_area;
+            g_be_quantity = record->quantity;
             free(record);
             g_camera_state = CAM_STATE_WAITING_OUT_QTY;
             return;
@@ -531,6 +539,10 @@ static void uart0_dispatch(const char *cmd_line)
             init_msg.cmd = CMD_INIT_CAMERA;
             snprintf(init_msg.tag_id, sizeof(init_msg.tag_id), "%s", g_current_tag_id);
             xQueueSend(xSystemQueue, &init_msg, portMAX_DELAY);
+            // 同步 business_executor 状态机
+            g_be_state = BE_STATE_WAITING_CAPTURE;
+            g_be_task = BE_CMD_OUTBOUND;
+            g_be_remove_qty = g_outbound_quantity;
             uart_write_bytes(UART_NUM_0, "\r\n[STEP 1/1] Capture FRONT view -> Send 'f'\r\n", 42);
             return;
         }

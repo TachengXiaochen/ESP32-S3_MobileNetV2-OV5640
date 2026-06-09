@@ -6,11 +6,11 @@
 static const char *TAG = "similarity_matcher";
 
 // 动态阈值定义
-#define THRESHOLD_ELECTRONIC  0.85f
-#define THRESHOLD_FURNITURE   0.70f
-#define THRESHOLD_TOOL        0.78f
-#define THRESHOLD_CONTAINER   0.75f
-#define THRESHOLD_DEFAULT     0.75f
+#define THRESHOLD_ELECTRONIC  0.90f
+#define THRESHOLD_FURNITURE   0.90f
+#define THRESHOLD_TOOL        0.90f
+#define THRESHOLD_CONTAINER   0.90f
+#define THRESHOLD_DEFAULT     0.90f
 
 // 置信度校准参数（基于学习的映射表）
 // 这些参数是通过历史数据拟合得到的
@@ -112,17 +112,9 @@ float similarity_matcher_euclidean(const float *feat1, const float *feat2, int s
 
 float similarity_matcher_mixed(const float *feat1, const float *feat2, int size)
 {
-    if (!feat1 || !feat2 || size <= 0) {
-        return 0.0f;
-    }
-
-    float cosine_sim = similarity_matcher_cosine(feat1, feat2, size);
-    float euclidean_sim = similarity_matcher_euclidean(feat1, feat2, size);
-
-    // 混合相似度：0.7*cosine + 0.3*euclidean
-    float mixed = 0.7f * cosine_sim + 0.3f * euclidean_sim;
-
-    return mixed;
+    // 高维 L2-normalized 特征下 cosine 是最可靠的相似度度量
+    // euclidean 在高维下 1/(1+d/1280) ≈ 1.0 恒成立，无区分力
+    return similarity_matcher_cosine(feat1, feat2, size);
 }
 
 float similarity_matcher_get_threshold(asset_class_t asset_class)

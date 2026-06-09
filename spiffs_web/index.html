@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ESP32-S3 CAM AI 实时预览</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<div class="header">
+  <h1>ESP32-S3 CAM AI 实时预览</h1>
+  <span class="ver">v3.4</span>
+</div>
+
+<div class="main-row">
+
+  <!-- 左侧：实时画面 -->
+  <div class="stream-panel">
+    <div class="panel-title">📷 实时画面 <span class="fps" id="fps"></span></div>
+    <div class="stream-wrap">
+      <img id="stream" src="/stream" alt="MJPEG Stream" onload="onStreamLoad()" onerror="onStreamError()">
+    </div>
+    <button class="btn" onclick="takeSnapshot()">📸 拍摄快照</button>
+    <div id="stream-status" class="stream-status">等待连接...</div>
+  </div>
+
+  <!-- 右侧：系统状态 -->
+  <div class="status-panel">
+    <div class="panel-title">● 系统状态</div>
+    <table class="status-table">
+      <tr><td>堆内存</td><td id="st-heap">--</td></tr>
+      <tr><td>最小堆</td><td id="st-minheap">--</td></tr>
+      <tr><td>摄像头</td><td id="st-camera">--</td></tr>
+      <tr><td>存储</td><td id="st-storage">--</td></tr>
+      <tr><td>业务状态</td><td id="st-bstate">--</td></tr>
+      <tr><td>当前Tag</td><td id="st-tagid">--</td></tr>
+      <tr><td>WiFi客户端</td><td id="st-wifi">--</td></tr>
+    </table>
+  </div>
+
+</div>
+
+<!-- 底部：FST 三视图帧画廊 -->
+<div class="gallery-panel">
+  <div class="panel-title">📂 FST 三视图帧图片</div>
+  <div class="gallery-controls">
+    <label>Tag ID:</label>
+    <select id="tag-select"><option value="">-- 加载中 --</option></select>
+    <button class="btn" onclick="loadFrames()">加载</button>
+  </div>
+
+  <div class="frames-row">
+    <div class="frame-card">
+      <div class="frame-label">正面 (Front)</div>
+      <div class="frame-img-wrap">
+        <span id="img-front-na" class="na-label">--</span>
+        <img id="img-front" class="frame-img" style="display:none" alt="Front">
+      </div>
+      <div class="frame-info" id="info-front">--</div>
+    </div>
+    <div class="frame-card">
+      <div class="frame-label">侧面 (Side)</div>
+      <div class="frame-img-wrap">
+        <span id="img-side-na" class="na-label">--</span>
+        <img id="img-side" class="frame-img" style="display:none" alt="Side">
+      </div>
+      <div class="frame-info" id="info-side">--</div>
+    </div>
+    <div class="frame-card">
+      <div class="frame-label">顶部 (Top)</div>
+      <div class="frame-img-wrap">
+        <span id="img-top-na" class="na-label">--</span>
+        <img id="img-top" class="frame-img" style="display:none" alt="Top">
+      </div>
+      <div class="frame-info" id="info-top">--</div>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

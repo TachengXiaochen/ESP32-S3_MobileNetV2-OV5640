@@ -43,6 +43,7 @@ public:
     Cls &set_topk(int topk) override;
     Cls &set_score_thr(float score_thr) override;
     dl::Model *get_raw_model() override;
+    dl::image::ImagePreprocessor *get_image_preprocessor() { return m_image_preprocessor; }
 };
 } // namespace cls
 } // namespace dl

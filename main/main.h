@@ -5,8 +5,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "driver/gpio.h"  // GPIO引脚定义
-#include "modules/system/asset_manager.h"
-#include "modules/system/business_executor.h"   // ⭐ 新增：业务执行器
+#include "modules/system/storage/asset_manager.h"
+#include "modules/system/executor/business_executor.h"   // ⭐ 新增：业务执行器
 
 // ========== WS63 协议配置 ==========
 // UART1 使用空闲 GPIO47/21，避免与摄像头 DVP GPIO17/18 冲突
@@ -110,6 +110,9 @@ extern inventory_state_t g_inventory_state;
 extern float g_front_feature[];
 extern float g_side_feature[];
 extern float g_top_feature[];
+extern float g_stored_front_feature[];  // 库存特征（比对时用）
+extern float g_stored_side_feature[];
+extern float g_stored_top_feature[];
 extern bool g_camera_ready;
 extern bool g_storage_ready;
 extern bool g_camera_power_on;

@@ -26,33 +26,44 @@ typedef struct {
     int channels;       ///< 通道数 (3 for RGB888)
 } image_t;
 
+// ============================================================
+// 模糊检测阈值（针对 2× 降采样后的 160×120 有效分辨率）
+// 全分辨率 (320×240) 对应值: ACCEPT=50.0, CONFIDENT=150.0
+// ============================================================
+
+/** @brief 模糊接受阈值 — 低于此值判定为模糊，丢弃帧 */
+#define BLUR_ACCEPT_THRESHOLD     12.5f
+
+/** @brief 高置信阈值 — 高于此值帧非常清晰，单帧即可使用 */
+#define BLUR_CONFIDENT_THRESHOLD  37.5f
+
 /**
- * @brief 计算图像的拉普拉斯方差
- * 
- * @param img 输入图像 (RGB888格式)
- * @return float 拉普拉斯方差值，值越小表示图像越模糊
+ * @brief 计算图像的拉普拉斯方差（内部使用 2× 降采样加速）
+ *
+ * @param img 输入图像 (RGB888格式, 320×240)
+ * @return float 拉普拉斯方差值（降采样后的值），值越小表示图像越模糊
  */
 float blur_detect_laplacian_variance(const image_t* img);
 
 /**
  * @brief 判断图像是否清晰（非模糊）
- * 
+ *
  * @param img 输入图像 (RGB888格式)
- * @param threshold 阈值，默认建议50.0
+ * @param threshold 阈值，建议 BLUR_ACCEPT_THRESHOLD (12.5)
  * @return true 图像清晰，可以用于特征提取
  * @return false 图像模糊，应该丢弃
  */
 bool blur_detect_is_sharp(const image_t* img, float threshold);
 
 /**
- * @brief 快速判断图像是否清晰（使用默认阈值50.0）
- * 
+ * @brief 快速判断图像是否清晰（使用默认 BLUR_ACCEPT_THRESHOLD）
+ *
  * @param img 输入图像 (RGB888格式)
  * @return true 图像清晰
  * @return false 图像模糊
  */
 static inline bool blur_detect_is_sharp_default(const image_t* img) {
-    return blur_detect_is_sharp(img, 50.0f);
+    return blur_detect_is_sharp(img, BLUR_ACCEPT_THRESHOLD);
 }
 
 #ifdef __cplusplus

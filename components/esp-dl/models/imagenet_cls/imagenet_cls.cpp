@@ -21,7 +21,7 @@ MobileNetV2::MobileNetV2(const char *model_name, int topk, float score_thr)
     auto sd_path = std::filesystem::path(CONFIG_BSP_SD_MOUNT_POINT) / CONFIG_IMAGENET_CLS_MODEL_SDCARD_DIR / model_name;
     m_model = new dl::Model(sd_path.c_str(), fbs::MODEL_LOCATION_IN_SDCARD);
 #endif
-    m_model->minimize();
+    // m_model->minimize();  // 保留名称映射，用于提取 GAP 中间层特征
     m_image_preprocessor =
         new dl::image::ImagePreprocessor(m_model, {123.675, 116.28, 103.53}, {58.395, 57.12, 57.375});
     m_postprocessor = new dl::cls::ImageNetClsPostprocessor(m_model, topk, score_thr, true);

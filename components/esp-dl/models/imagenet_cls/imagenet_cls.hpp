@@ -20,6 +20,14 @@ public:
     ImageNetCls(model_type_t model_type = static_cast<model_type_t>(CONFIG_DEFAULT_IMAGENET_CLS_MODEL),
                 bool lazy_load = true);
 
+    /**
+     * @brief 获取图像预处理器（用于自定义推理流程，如提取中间层特征）
+     */
+    dl::image::ImagePreprocessor *get_image_preprocessor()
+    {
+        return static_cast<dl::cls::ClsImpl *>(m_model)->get_image_preprocessor();
+    }
+
 private:
     void load_model();
 

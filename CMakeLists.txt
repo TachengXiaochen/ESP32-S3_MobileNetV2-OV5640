@@ -16,3 +16,6 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 set(PARTITION_TABLE_FILENAME "partitions.csv")
 
 project(CAM_AI)
+
+# 从 spiffs_web/ 目录生成 SPIFFS 镜像并烧录到 storage 分区
+spiffs_create_partition_image(storage ${CMAKE_CURRENT_SOURCE_DIR}/spiffs_web FLASH_IN_PROJECT)

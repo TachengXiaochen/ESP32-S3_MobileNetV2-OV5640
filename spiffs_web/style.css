@@ -1,0 +1,45 @@
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#1a1a2e;color:#e0e0e0;padding:10px;max-width:900px;margin:0 auto}
+
+.header{text-align:center;padding:8px 0 12px;border-bottom:1px solid #333;margin-bottom:10px}
+.header h1{font-size:20px;color:#00d4ff;display:inline}
+.ver{color:#666;font-size:12px;margin-left:8px}
+
+.main-row{display:flex;gap:10px;margin-bottom:10px}
+
+.stream-panel{flex:0 0 340px;background:#16213e;border-radius:8px;padding:10px}
+.status-panel{flex:1;background:#16213e;border-radius:8px;padding:10px}
+
+.panel-title{font-size:14px;font-weight:bold;color:#00d4ff;margin-bottom:8px}
+.fps{color:#888;font-size:11px;font-weight:normal}
+
+.stream-wrap{border:1px solid #333;border-radius:4px;overflow:hidden;background:#000;width:320px;height:240px;display:flex;align-items:center;justify-content:center}
+.stream-wrap img{width:100%;height:100%;object-fit:contain}
+.stream-status{text-align:center;font-size:11px;color:#888;margin-top:4px}
+
+.btn{display:block;width:100%;padding:8px;margin-top:8px;background:#0f3460;color:#00d4ff;border:1px solid #00d4ff;border-radius:4px;font-size:13px;cursor:pointer}
+.btn:hover{background:#1a5080}
+
+.status-table{width:100%;font-size:13px;border-collapse:collapse}
+.status-table td{padding:5px 8px;border-bottom:1px solid #222}
+.status-table td:first-child{color:#888;width:40%}
+.status-table td:last-child{color:#e0e0e0;font-family:monospace}
+
+.gallery-panel{background:#16213e;border-radius:8px;padding:10px}
+.gallery-controls{margin-bottom:10px;font-size:13px}
+.gallery-controls label{color:#888}
+.gallery-controls select{padding:4px 8px;margin:0 8px;background:#0f3460;color:#e0e0e0;border:1px solid #333;border-radius:4px;font-size:13px}
+.gallery-controls .btn{display:inline;width:auto;padding:4px 16px;margin:0}
+
+.frames-row{display:flex;gap:10px}
+.frame-card{flex:1;background:#1a1a2e;border-radius:6px;padding:8px;text-align:center}
+.frame-label{font-size:12px;color:#00d4ff;margin-bottom:6px}
+.frame-img-wrap{width:100%;aspect-ratio:4/3;background:#000;border-radius:4px;overflow:hidden;display:flex;align-items:center;justify-content:center;margin-bottom:4px}
+.frame-img{width:100%;height:100%;object-fit:contain}
+.na-label{color:#555;font-size:13px}
+.frame-info{font-size:11px;color:#888}
+
+/* 状态指示灯颜色 */
+.ok{color:#4caf50!important}
+.err{color:#f44336!important}
+.warn{color:#ff9800!important}

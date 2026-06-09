@@ -54,9 +54,18 @@ bool feature_processor_get_fused_feature(float *output, int feature_size);
 int feature_processor_get_frame_count(void);
 
 /**
- * @brief 清空融合缓冲区
+ * @brief 清空融合缓冲区（释放并重建buffer）
  */
 void feature_processor_clear_buffer(void);
+
+/**
+ * @brief 仅重置帧计数（不释放buffer，避免重复malloc/free）
+ *
+ * 与 clear_buffer 不同，此函数只将 frame_count 置零，
+ * 保留已分配的 frame_buffer 内存供下次使用，减少堆碎片。
+ * 适用于频繁切换视图的场景。
+ */
+void feature_processor_reset_frame_count(void);
 
 /**
  * @brief 强化的特征归一化（包含通道维度的批归一化）
