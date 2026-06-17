@@ -237,11 +237,6 @@ void be_register_ws63_send_func(void (*func)(const char *));
 // ========== 全局状态变量（供外部模块同步业务状态）==========
 extern be_state_t g_be_state;
 extern be_cmd_t g_be_task;
-extern char g_be_tag_id[TAG_ID_STR_LEN];
-extern char g_be_item_name[128];
-extern char g_be_storage_area;
-extern uint32_t g_be_quantity;
-extern uint32_t g_be_remove_qty;
 
 #ifdef __cplusplus
 }

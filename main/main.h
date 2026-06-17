@@ -98,35 +98,93 @@ typedef struct {
     bool must_save_jpeg;            // 是否必须保存JPEG(注册模式)
 } inference_job_t;
 
-// 外部变量声明（供cmd_handler访问）
+// ===================================================================
+//  全局运行时上下文（精简：14个字段 → 1个结构体）
+// ===================================================================
+typedef struct {
+    // 模块状态
+    bool camera_ready;
+    bool storage_ready;
+    bool storage_initialized;
+    bool camera_power_on;
+
+    // 当前任务上下文
+    char current_tag_id[TAG_ID_STR_LEN];
+    char reg_item_name[128];
+    char reg_storage_area;
+    uint32_t reg_quantity;
+    uint32_t outbound_quantity;
+    uint32_t outbound_original_qty;
+
+    // 推理进度
+    int views_enqueued;
+    int views_processed;
+    int total_views;
+    bool inference_cancelled;
+
+    // 模式标志
+    bool is_inventory_mode;
+    bool is_outbound_mode;
+
+    // 状态枚举（UART0 调试 + be_reset_state 共享）
+    camera_state_t camera_state;
+    view_state_t view_state;
+    inventory_state_t inventory_state;
+
+    // L610 4G
+    char l610_client_id[64];
+} app_context_t;
+
+extern app_context_t g_ctx;
+
+// ===================================================================
+//  IPC 句柄（保持独立 — FreeRTOS 惯用法）
+// ===================================================================
 extern QueueHandle_t xSystemQueue;
 extern QueueHandle_t xStorageQueue;
-extern QueueHandle_t xInferenceQueue;  // 推理任务队列
-extern SemaphoreHandle_t xCameraMutex; // 摄像头访问互斥锁
-extern char g_current_tag_id[];     // ⭐ 替代 g_current_mac
-extern camera_state_t g_camera_state;
-extern view_state_t g_view_state;
-extern inventory_state_t g_inventory_state;
+extern QueueHandle_t xInferenceQueue;
+extern SemaphoreHandle_t xCameraMutex;
+
+// ===================================================================
+//  特征缓冲区（保持独立数组 — PSRAM 对齐，被多处取地址传递）
+// ===================================================================
 extern float g_front_feature[];
 extern float g_side_feature[];
 extern float g_top_feature[];
-extern float g_stored_front_feature[];  // 库存特征（比对时用）
+extern float g_stored_front_feature[];
 extern float g_stored_side_feature[];
 extern float g_stored_top_feature[];
-extern bool g_camera_ready;
-extern bool g_storage_ready;
-extern bool g_camera_power_on;
-extern bool g_is_inventory_mode;    // 区分注册和盘点模式的标志位
-extern bool g_is_outbound_mode;     // 区分出库模式的标志位
-extern char g_reg_item_name[];      // 注册模式：物品名称
-extern char g_reg_storage_area;     // 注册模式：存放区域
-extern uint32_t g_reg_quantity;     // 注册模式：数量
-extern uint32_t g_outbound_quantity; // 出库模式：出库数量
 
-// 推理任务进度计数器
-extern int g_views_enqueued;        // 已入队推理任务数
-extern int g_views_processed;       // 已完成推理数
-extern int g_total_views;           // 期望总视图数
+// ===================================================================
+//  UART0 调试专用（verify_handler 模块直接引用）
+// ===================================================================
+// verify_context_t 声明在 verify_handler.h 中
+// extern verify_context_t g_verify_ctx; — 已由 verify_handler.h 声明
+
+// ===================================================================
+//  向后兼容宏：旧名称 → g_ctx 字段
+//  其他文件无需立即修改，通过宏透明映射
+// ===================================================================
+#define g_camera_ready          (g_ctx.camera_ready)
+#define g_storage_ready         (g_ctx.storage_ready)
+#define g_storage_initialized   (g_ctx.storage_initialized)
+#define g_camera_power_on       (g_ctx.camera_power_on)
+#define g_current_tag_id        (g_ctx.current_tag_id)
+#define g_reg_item_name         (g_ctx.reg_item_name)
+#define g_reg_storage_area      (g_ctx.reg_storage_area)
+#define g_reg_quantity          (g_ctx.reg_quantity)
+#define g_outbound_quantity     (g_ctx.outbound_quantity)
+#define g_outbound_original_qty (g_ctx.outbound_original_qty)
+#define g_views_enqueued        (g_ctx.views_enqueued)
+#define g_views_processed       (g_ctx.views_processed)
+#define g_total_views           (g_ctx.total_views)
+#define g_inference_cancelled   (g_ctx.inference_cancelled)
+#define g_is_inventory_mode     (g_ctx.is_inventory_mode)
+#define g_is_outbound_mode      (g_ctx.is_outbound_mode)
+#define g_camera_state          (g_ctx.camera_state)
+#define g_view_state            (g_ctx.view_state)
+#define g_inventory_state       (g_ctx.inventory_state)
+#define g_l610_client_id        (g_ctx.l610_client_id)
 
 // 外部函数声明
 void asset_list_uart(void);

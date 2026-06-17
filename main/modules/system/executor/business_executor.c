@@ -12,6 +12,7 @@
 #include "main.h"
 #include "modules/ai/ai_module.h"
 #include "modules/system/storage/storage_module.h"
+#include "modules/system/led/led_indicator.h"
 #include "modules/system/verify/tag_id_validator.h"
 #include "modules/system/verify/verify_handler.h"
 
@@ -25,13 +26,7 @@ static be_channel_t g_be_channel = BE_CHANNEL_UART1_JSON;
 be_state_t g_be_state = BE_STATE_IDLE;
 be_cmd_t g_be_task = BE_CMD_UNKNOWN;
 
-// 任务上下文
-char g_be_tag_id[TAG_ID_STR_LEN] = {0};
-char g_be_item_name[128] = {0};
-char g_be_storage_area = 'A';
-uint32_t g_be_quantity = 0;
-uint32_t g_be_remove_qty = 0;
-static int g_be_total_views = 0;
+// 任务上下文（Tag ID/物品名/数量等统一使用 main.h 全局变量）
 static int g_be_captured_views = 0;
 static bool g_be_is_verify_mode = false;
 
@@ -72,27 +67,22 @@ esp_err_t be_cancel(be_channel_t channel)
         return ESP_ERR_INVALID_STATE;
     }
     be_cmd_t cancelled_task = g_be_task;
-    extern bool g_camera_power_on;
     if (g_camera_power_on) {
-        extern void led_camera_off(void);
         led_camera_off();
         g_camera_power_on = false;
-        extern QueueHandle_t xSystemQueue;
         system_msg_t deinit_msg = { .cmd = CMD_DEINIT_CAMERA };
         xQueueSend(xSystemQueue, &deinit_msg, pdMS_TO_TICKS(500));
     }
-    extern QueueHandle_t xInferenceQueue;
     inference_job_t discard;
     while (xQueueReceive(xInferenceQueue, &discard, 0) == pdTRUE) {}
-    extern int g_views_enqueued;
-    extern int g_views_processed;
+    g_inference_cancelled = true;  // 通知正在执行的推理丢弃结果
     g_views_enqueued = 0;
     g_views_processed = 0;
     be_reset_state();
     be_task_done_t done = {0};
     done.task = cancelled_task;
-    strncpy(done.tag_id, g_be_tag_id, sizeof(done.tag_id) - 1);
-    strncpy(done.item_name, g_be_item_name, sizeof(done.item_name) - 1);
+    strncpy(done.tag_id, g_current_tag_id, sizeof(done.tag_id) - 1);
+    strncpy(done.item_name, g_reg_item_name, sizeof(done.item_name) - 1);
     done.result = (const char*)"cancelled";
     g_be_cb(channel, BE_EVT_TASK_DONE, &done);
     ESP_LOGI(TAG, "Task cancelled: %d", cancelled_task);
@@ -178,8 +168,8 @@ static esp_err_t be_handle_register(be_channel_t channel, const char *tag_id, co
     }
 
     // 3. 保存任务上下文
-    strncpy(g_be_tag_id, normalized, sizeof(g_be_tag_id) - 1);
-    g_be_tag_id[sizeof(g_be_tag_id) - 1] = '\0';
+    strncpy(g_current_tag_id, normalized, TAG_ID_STR_LEN - 1);
+    g_current_tag_id[TAG_ID_STR_LEN - 1] = '\0';
 
     // ⭐ 从 params JSON 提取注册参数（修复：之前 TODO 未实现）
     if (params != NULL && params[0] == '{') {
@@ -189,45 +179,32 @@ static esp_err_t be_handle_register(be_channel_t channel, const char *tag_id, co
             cJSON *area = cJSON_GetObjectItem(json, "storage_area");
             cJSON *qty  = cJSON_GetObjectItem(json, "quantity");
             if (item && cJSON_IsString(item))
-                strncpy(g_be_item_name, item->valuestring, sizeof(g_be_item_name) - 1);
+                strncpy(g_reg_item_name, item->valuestring, 128 - 1);
             if (area && cJSON_IsString(area) && strlen(area->valuestring) > 0)
-                g_be_storage_area = toupper((unsigned char)area->valuestring[0]);
+                g_reg_storage_area = toupper((unsigned char)area->valuestring[0]);
             if (qty && cJSON_IsNumber(qty))
-                g_be_quantity = (uint32_t)qty->valueint;
+                g_reg_quantity = (uint32_t)qty->valueint;
             cJSON_Delete(json);
         }
-    } else {
-        extern char g_reg_item_name[];
-        extern char g_reg_storage_area;
-        extern uint32_t g_reg_quantity;
-        strncpy(g_be_item_name, g_reg_item_name, sizeof(g_be_item_name) - 1);
-        g_be_storage_area = g_reg_storage_area;
-        g_be_quantity = g_reg_quantity;
     }
+    // else: UART0 路径，g_reg_item_name / g_reg_storage_area / g_reg_quantity
+    // 已由 uart_handler_0 设置到 main.h 全局变量（去重后无需二次拷贝）
 
     g_be_task = BE_CMD_REGISTER;
-    g_be_total_views = 3;
+    g_total_views = 3;
     g_be_state = BE_STATE_HARDWARE_INIT;
 
     // 4. 硬件初始化（AI 模型已在 app_main 中开机加载）
-    extern bool g_is_inventory_mode;
-    extern bool g_is_outbound_mode;
     g_is_inventory_mode = false;
     g_is_outbound_mode = false;
-    extern int g_total_views;
-    g_total_views = 3;
-    extern char g_current_tag_id[];
-    snprintf(g_current_tag_id, TAG_ID_STR_LEN, "%s", normalized);
 
     // 4b. 先发送初始化存储指令（与 cmd_handler 一致，确保 SD 卡就绪）
-    extern QueueHandle_t xStorageQueue;
     system_msg_t init_storage_msg = {0};
     init_storage_msg.cmd = CMD_INIT_STORAGE;
     xQueueSend(xStorageQueue, &init_storage_msg, portMAX_DELAY);
 
     // 4c. 通过 xSystemQueue 异步初始化摄像头（与 be_handle_inventory 一致）
     // 在 camera_ai_task 上下文中安全执行 i2c_driver_install，避免 UART ISR 冲突
-    extern QueueHandle_t xSystemQueue;
     system_msg_t cam_init_msg = {0};
     cam_init_msg.cmd = CMD_INIT_CAMERA;
     snprintf(cam_init_msg.tag_id, sizeof(cam_init_msg.tag_id), "%s", normalized);
@@ -244,15 +221,15 @@ static esp_err_t be_handle_register(be_channel_t channel, const char *tag_id, co
     be_hardware_ready_t ready = {0};
     strncpy(ready.tag_id, normalized, sizeof(ready.tag_id) - 1);
     ready.total_views = 3;
-    strncpy(ready.item_name, g_be_item_name, sizeof(ready.item_name) - 1);
-    ready.storage_area = g_be_storage_area;
-    ready.quantity = g_be_quantity;
+    strncpy(ready.item_name, g_reg_item_name, sizeof(ready.item_name) - 1);
+    ready.storage_area = g_reg_storage_area;
+    ready.quantity = g_reg_quantity;
     g_be_cb(channel, BE_EVT_HARDWARE_READY, &ready);
 
     free(existing);
     g_be_state = BE_STATE_WAITING_CAPTURE;
     ESP_LOGI(TAG, "Register started: tag_id=%s, item=%s, qty=%lu",
-             normalized, g_be_item_name, (unsigned long)g_be_quantity);
+             normalized, g_reg_item_name, (unsigned long)g_reg_quantity);
     return ESP_OK;
 }
 
@@ -290,23 +267,17 @@ static esp_err_t be_handle_inventory(be_channel_t channel, const char *tag_id, c
     memcpy(g_stored_front_feature, record->front_feature, FEATURE_VEC_SIZE * sizeof(float));
     memcpy(g_stored_side_feature, record->side_feature, FEATURE_VEC_SIZE * sizeof(float));
     memcpy(g_stored_top_feature, record->top_feature, FEATURE_VEC_SIZE * sizeof(float));
-    strncpy(g_be_tag_id, normalized, sizeof(g_be_tag_id) - 1);
-    strncpy(g_be_item_name, record->item_name, sizeof(g_be_item_name) - 1);
-    g_be_storage_area = record->storage_area;
-    g_be_quantity = record->quantity;
+    strncpy(g_current_tag_id, normalized, TAG_ID_STR_LEN - 1);
+    strncpy(g_reg_item_name, record->item_name, 128 - 1);
+    g_reg_storage_area = record->storage_area;
+    g_reg_quantity = record->quantity;
     free(record);
     g_be_task = BE_CMD_INVENTORY;
-    g_be_total_views = 3;
-    g_be_state = BE_STATE_HARDWARE_INIT;
-    extern bool g_is_inventory_mode;
-    g_is_inventory_mode = true;
-    extern int g_total_views;
     g_total_views = 3;
-    extern char g_current_tag_id[];
-    snprintf(g_current_tag_id, TAG_ID_STR_LEN, "%s", normalized);
+    g_be_state = BE_STATE_HARDWARE_INIT;
+    g_is_inventory_mode = true;
 
     // 先发送初始化存储指令（与 cmd_handler 一致）
-    extern QueueHandle_t xStorageQueue;
     system_msg_t init_storage_msg = {0};
     init_storage_msg.cmd = CMD_INIT_STORAGE;
     if (!xQueueSend(xStorageQueue, &init_storage_msg, pdMS_TO_TICKS(200))) {
@@ -328,12 +299,12 @@ static esp_err_t be_handle_inventory(be_channel_t channel, const char *tag_id, c
     be_hardware_ready_t ready = {0};
     strncpy(ready.tag_id, normalized, sizeof(ready.tag_id) - 1);
     ready.total_views = 3;
-    strncpy(ready.item_name, g_be_item_name, sizeof(ready.item_name) - 1);
-    ready.storage_area = g_be_storage_area;
-    ready.quantity = g_be_quantity;
+    strncpy(ready.item_name, g_reg_item_name, sizeof(ready.item_name) - 1);
+    ready.storage_area = g_reg_storage_area;
+    ready.quantity = g_reg_quantity;
     g_be_cb(channel, BE_EVT_HARDWARE_READY, &ready);
     g_be_state = BE_STATE_WAITING_CAPTURE;
-    ESP_LOGI(TAG, "Inventory started: tag_id=%s, item=%s", normalized, g_be_item_name);
+    ESP_LOGI(TAG, "Inventory started: tag_id=%s, item=%s", normalized, g_reg_item_name);
     return ESP_OK;
 }
 
@@ -375,54 +346,46 @@ static esp_err_t be_handle_outbound(be_channel_t channel, const char *tag_id, co
         if (json) {
             cJSON *j_qty = cJSON_GetObjectItem(json, "remove_qty");
             if (j_qty && cJSON_IsNumber(j_qty) && j_qty->valueint > 0)
-                g_be_remove_qty = (uint32_t)j_qty->valueint;
+                g_outbound_quantity = (uint32_t)j_qty->valueint;
             cJSON_Delete(json);
         }
     }
-    if (g_be_remove_qty == 0) g_be_remove_qty = 1;
+    if (g_outbound_quantity == 0) g_outbound_quantity = 1;
 
     // 保存上下文
-    strncpy(g_be_tag_id, normalized, sizeof(g_be_tag_id) - 1);
-    strncpy(g_be_item_name, record->item_name, sizeof(g_be_item_name) - 1);
-    g_be_storage_area = record->storage_area;
-    g_be_quantity = record->quantity;
+    strncpy(g_current_tag_id, normalized, TAG_ID_STR_LEN - 1);
+    strncpy(g_reg_item_name, record->item_name, 128 - 1);
+    g_reg_storage_area = record->storage_area;
+    g_reg_quantity = record->quantity;
     free(record);
 
     g_be_task = BE_CMD_OUTBOUND;
-    g_be_total_views = 1;  // 仅正视图
+    g_total_views = 1;  // 仅正视图
     // 摄像头不在此处初始化——等 capture 命令到达时按需初始化
 
-    extern bool g_is_outbound_mode;
-    extern bool g_is_inventory_mode;
     g_is_outbound_mode = false;
     g_is_inventory_mode = false;
 
-    extern int g_total_views;
-    g_total_views = 1;
-    extern char g_current_tag_id[];
-    snprintf(g_current_tag_id, TAG_ID_STR_LEN, "%s", normalized);
-
     // 初始化存储（SD 卡）
-    extern QueueHandle_t xStorageQueue;
     system_msg_t init_storage_msg = {0};
     init_storage_msg.cmd = CMD_INIT_STORAGE;
     xQueueSend(xStorageQueue, &init_storage_msg, portMAX_DELAY);
 
     // 发送 asset_info（不初始化摄像头，等待 WS63 确认后发 capture）
-    uint32_t remaining = (g_be_remove_qty >= g_be_quantity) ? 0 :
-                         (g_be_quantity - g_be_remove_qty);
+    uint32_t remaining = (g_outbound_quantity >= g_reg_quantity) ? 0 :
+                         (g_reg_quantity - g_outbound_quantity);
     be_asset_info_t info = {0};
     strncpy(info.tag_id, normalized, sizeof(info.tag_id) - 1);
-    strncpy(info.item_name, g_be_item_name, sizeof(info.item_name) - 1);
-    info.storage_area = g_be_storage_area;
-    info.quantity = g_be_quantity;
-    info.remove_qty = g_be_remove_qty;
+    strncpy(info.item_name, g_reg_item_name, sizeof(info.item_name) - 1);
+    info.storage_area = g_reg_storage_area;
+    info.quantity = g_reg_quantity;
+    info.remove_qty = g_outbound_quantity;
     info.remaining_qty = remaining;
     g_be_cb(channel, BE_EVT_ASSET_INFO, &info);
 
     g_be_state = BE_STATE_WAITING_CAPTURE;
     ESP_LOGI(TAG, "Outbound started: tag_id=%s, item=%s, remove_qty=%lu, remaining=%lu",
-             normalized, g_be_item_name, (unsigned long)g_be_remove_qty, (unsigned long)remaining);
+             normalized, g_reg_item_name, (unsigned long)g_outbound_quantity, (unsigned long)remaining);
     return ESP_OK;
 }
 
@@ -436,23 +399,21 @@ static esp_err_t be_handle_capture(be_channel_t channel, int view_index)
     }
 
     // 出库按需初始化：capture 到达时才初始化摄像头
-    extern bool g_camera_ready;
     if (!g_camera_ready && g_be_task == BE_CMD_OUTBOUND) {
-        extern QueueHandle_t xSystemQueue;
         system_msg_t cam_init_msg = {0};
         cam_init_msg.cmd = CMD_INIT_CAMERA;
-        snprintf(cam_init_msg.tag_id, sizeof(cam_init_msg.tag_id), "%s", g_be_tag_id);
+        snprintf(cam_init_msg.tag_id, sizeof(cam_init_msg.tag_id), "%s", g_current_tag_id);
         if (!xQueueSend(xSystemQueue, &cam_init_msg, pdMS_TO_TICKS(500))) {
             be_error_info_t err = { .error_code = -1, .error_msg = "Camera init queue full" };
             g_be_cb(channel, BE_EVT_ERROR, &err);
             return ESP_ERR_TIMEOUT;
         }
         be_hardware_ready_t ready = {0};
-        strncpy(ready.tag_id, g_be_tag_id, sizeof(ready.tag_id) - 1);
-        ready.total_views = g_be_total_views;
-        strncpy(ready.item_name, g_be_item_name, sizeof(ready.item_name) - 1);
-        ready.storage_area = g_be_storage_area;
-        ready.quantity = g_be_quantity;
+        strncpy(ready.tag_id, g_current_tag_id, sizeof(ready.tag_id) - 1);
+        ready.total_views = g_total_views;
+        strncpy(ready.item_name, g_reg_item_name, sizeof(ready.item_name) - 1);
+        ready.storage_area = g_reg_storage_area;
+        ready.quantity = g_reg_quantity;
         g_be_cb(channel, BE_EVT_HARDWARE_READY, &ready);
     }
 
@@ -463,14 +424,14 @@ static esp_err_t be_handle_capture(be_channel_t channel, int view_index)
     else view_cmd = CMD_CAPTURE_TOP;
     system_msg_t msg = {0};
     msg.cmd = view_cmd;
-    snprintf(msg.tag_id, sizeof(msg.tag_id), "%s", g_be_tag_id);
+    snprintf(msg.tag_id, sizeof(msg.tag_id), "%s", g_current_tag_id);
     if (!xQueueSend(xSystemQueue, &msg, pdMS_TO_TICKS(200))) {
         be_error_info_t err = { .error_code = -1, .error_msg = "System queue full, capture dropped" };
         g_be_cb(channel, BE_EVT_ERROR, &err);
         ESP_LOGW(TAG, "Capture dropped: queue full, view=%d", view_index);
         return ESP_ERR_TIMEOUT;
     }
-    ESP_LOGI(TAG, "Capture dispatched: view=%d, tag_id=%s", view_index, g_be_tag_id);
+    ESP_LOGI(TAG, "Capture dispatched: view=%d, tag_id=%s", view_index, g_current_tag_id);
     return ESP_OK;
 }
 
@@ -686,11 +647,11 @@ void be_on_view_captured(int view_index)
     ESP_LOGI(TAG, "View captured g_be_channel=%d", (int)g_be_channel);
     g_be_captured_views++;
     be_capture_progress_t prog = {0};
-    strncpy(prog.tag_id, g_be_tag_id, sizeof(prog.tag_id) - 1);
+    strncpy(prog.tag_id, g_current_tag_id, sizeof(prog.tag_id) - 1);
     prog.view_index = view_index;
-    prog.total_steps = g_be_total_views;
+    prog.total_steps = g_total_views;
     g_be_cb(g_be_channel, BE_EVT_CAPTURE_PROGRESS, &prog);
-    ESP_LOGI(TAG, "View captured: %d/%d (view_idx=%d)", g_be_captured_views, g_be_total_views, view_index);
+    ESP_LOGI(TAG, "View captured: %d/%d (view_idx=%d)", g_be_captured_views, g_total_views, view_index);
 }
 
 bool be_on_all_views_done(void)
@@ -709,10 +670,10 @@ bool be_on_all_views_done(void)
                 break;
             }
             memset(record, 0, sizeof(*record));
-            strncpy(record->tag_id, g_be_tag_id, sizeof(record->tag_id) - 1);
-            strncpy(record->item_name, g_be_item_name, sizeof(record->item_name) - 1);
-            record->storage_area = g_be_storage_area;
-            record->quantity = g_be_quantity;
+            strncpy(record->tag_id, g_current_tag_id, sizeof(record->tag_id) - 1);
+            strncpy(record->item_name, g_reg_item_name, sizeof(record->item_name) - 1);
+            record->storage_area = g_reg_storage_area;
+            record->quantity = g_reg_quantity;
             memcpy(record->front_feature, g_front_feature, sizeof(record->front_feature));
             memcpy(record->side_feature, g_side_feature, sizeof(record->side_feature));
             memcpy(record->top_feature, g_top_feature, sizeof(record->top_feature));
@@ -722,10 +683,10 @@ bool be_on_all_views_done(void)
             free(record);
             be_task_done_t done = {0};
             done.task = BE_CMD_REGISTER;
-            strncpy(done.tag_id, g_be_tag_id, sizeof(done.tag_id) - 1);
-            strncpy(done.item_name, g_be_item_name, sizeof(done.item_name) - 1);
-            done.storage_area = g_be_storage_area;
-            done.quantity = g_be_quantity;
+            strncpy(done.tag_id, g_current_tag_id, sizeof(done.tag_id) - 1);
+            strncpy(done.item_name, g_reg_item_name, sizeof(done.item_name) - 1);
+            done.storage_area = g_reg_storage_area;
+            done.quantity = g_reg_quantity;
             done.is_overwrite = is_overwrite;
             done.result = (ret == ESP_OK) ? "success" : "failed";
             g_be_cb(g_be_channel, BE_EVT_TASK_DONE, &done);
@@ -733,7 +694,6 @@ bool be_on_all_views_done(void)
         }
         case BE_CMD_INVENTORY: {
             similarity_result_t front_result = {0}, side_result = {0}, top_result = {0};
-            extern bool ai_module_match_features(const float *, const float *, int, asset_class_t, similarity_result_t *);
             ai_module_match_features(g_front_feature, g_stored_front_feature, FEATURE_VEC_SIZE, ASSET_CLASS_UNKNOWN, &front_result);
             ai_module_match_features(g_side_feature, g_stored_side_feature, FEATURE_VEC_SIZE, ASSET_CLASS_UNKNOWN, &side_result);
             ai_module_match_features(g_top_feature, g_stored_top_feature, FEATURE_VEC_SIZE, ASSET_CLASS_UNKNOWN, &top_result);
@@ -741,10 +701,10 @@ bool be_on_all_views_done(void)
             bool is_match = (weighted_conf >= front_result.match_threshold);
             be_task_done_t done = {0};
             done.task = BE_CMD_INVENTORY;
-            strncpy(done.tag_id, g_be_tag_id, sizeof(done.tag_id) - 1);
-            strncpy(done.item_name, g_be_item_name, sizeof(done.item_name) - 1);
-            done.storage_area = g_be_storage_area;
-            done.quantity = g_be_quantity;
+            strncpy(done.tag_id, g_current_tag_id, sizeof(done.tag_id) - 1);
+            strncpy(done.item_name, g_reg_item_name, sizeof(done.item_name) - 1);
+            done.storage_area = g_reg_storage_area;
+            done.quantity = g_reg_quantity;
             done.is_match = is_match;
             done.confidence = weighted_conf;
             done.threshold = front_result.match_threshold;
@@ -755,14 +715,14 @@ bool be_on_all_views_done(void)
         case BE_CMD_OUTBOUND: {
             be_task_done_t done = {0};
             done.task = BE_CMD_OUTBOUND;
-            strncpy(done.tag_id, g_be_tag_id, sizeof(done.tag_id) - 1);
-            strncpy(done.item_name, g_be_item_name, sizeof(done.item_name) - 1);
-            done.previous_qty = g_be_quantity;
-            done.remove_qty = g_be_remove_qty;
+            strncpy(done.tag_id, g_current_tag_id, sizeof(done.tag_id) - 1);
+            strncpy(done.item_name, g_reg_item_name, sizeof(done.item_name) - 1);
+            done.previous_qty = g_reg_quantity;
+            done.remove_qty = g_outbound_quantity;
 
             // 加载存储的特征向量进行比对
             asset_record_t *stored = (asset_record_t *)malloc(sizeof(asset_record_t));
-            if (stored && asset_load(g_be_tag_id, stored) == ESP_OK && stored->is_valid) {
+            if (stored && asset_load(g_current_tag_id, stored) == ESP_OK && stored->is_valid) {
                 similarity_result_t result = {0};
                 ai_module_match_features(g_front_feature, stored->front_feature,
                     FEATURE_VEC_SIZE, ASSET_CLASS_UNKNOWN, &result);
@@ -773,12 +733,12 @@ bool be_on_all_views_done(void)
                 if (done.is_match) {
                     // 匹配成功：扣减数量
                     uint32_t new_qty = stored->quantity;
-                    if (g_be_remove_qty >= new_qty) new_qty = 0;
-                    else new_qty -= g_be_remove_qty;
+                    if (g_outbound_quantity >= new_qty) new_qty = 0;
+                    else new_qty -= g_outbound_quantity;
                     done.quantity = new_qty;
                     bool ow = false;
                     if (new_qty == 0) {
-                        asset_delete(g_be_tag_id);
+                        asset_delete(g_current_tag_id);
                     } else {
                         stored->quantity = new_qty;
                         asset_save(stored, &ow);
@@ -807,22 +767,24 @@ bool be_on_all_views_done(void)
 
 static void be_reset_state(void)
 {
+    // BE 内部状态
     g_be_state = BE_STATE_IDLE;
     g_be_task = BE_CMD_UNKNOWN;
-    memset(g_be_tag_id, 0, sizeof(g_be_tag_id));
-    memset(g_be_item_name, 0, sizeof(g_be_item_name));
-    g_be_storage_area = 'A';
-    g_be_quantity = 0;
-    g_be_remove_qty = 0;
-    g_be_total_views = 0;
     g_be_captured_views = 0;
     g_be_is_verify_mode = false;
 
-    // 复位 camera 状态到主菜单（与 system_shutdown_camera() 一致）
+    // main.h 全局状态（一次性全部复位，与 system_shutdown_camera() 对齐）
     g_camera_state = CAM_STATE_WAITING_TAG_ID;
+    g_view_state = BE_VIEW_NONE;
+    g_inventory_state = INVENTORY_IDLE;
     g_is_inventory_mode = false;
     g_is_outbound_mode = false;
-    g_inventory_state = INVENTORY_IDLE;
+    memset(g_current_tag_id, 0, TAG_ID_STR_LEN);
+    g_reg_item_name[0] = '\0';
+    g_reg_storage_area = 'A';
+    g_reg_quantity = 0;
+    g_outbound_quantity = 0;
+    g_total_views = 0;
 }
 
 void be_register_ws63_send_func(void (*func)(const char *))

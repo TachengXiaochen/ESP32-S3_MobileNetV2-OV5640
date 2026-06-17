@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
+#include "esp_system.h"
 #include "esp_log.h"
 #include "esp_task_wdt.h"
 #include "driver/uart.h"
@@ -510,11 +511,10 @@ static void uart0_dispatch(const char *cmd_line)
                      lookup_id, record->item_name, (unsigned long)record->quantity);
             uart_write_bytes(UART_NUM_0, info_msg, strlen(info_msg));
             snprintf(g_current_tag_id, TAG_ID_STR_LEN, "%s", lookup_id);
-            // 保存资产上下文到 business_executor（be_on_all_views_done 需要）
-            snprintf(g_be_tag_id, sizeof(g_be_tag_id), "%s", lookup_id);
-            snprintf(g_be_item_name, sizeof(g_be_item_name), "%s", record->item_name);
-            g_be_storage_area = record->storage_area;
-            g_be_quantity = record->quantity;
+            // 保存资产上下文（be_on_all_views_done OUTBOUND 需要）
+            snprintf(g_reg_item_name, 128, "%s", record->item_name);
+            g_reg_storage_area = record->storage_area;
+            g_reg_quantity = record->quantity;
             free(record);
             g_camera_state = CAM_STATE_WAITING_OUT_QTY;
             return;
@@ -542,7 +542,6 @@ static void uart0_dispatch(const char *cmd_line)
             // 同步 business_executor 状态机
             g_be_state = BE_STATE_WAITING_CAPTURE;
             g_be_task = BE_CMD_OUTBOUND;
-            g_be_remove_qty = g_outbound_quantity;
             uart_write_bytes(UART_NUM_0, "\r\n[STEP 1/1] Capture FRONT view -> Send 'f'\r\n", 42);
             return;
         }
@@ -640,6 +639,39 @@ void uart_handler_0_on_event(be_event_t event, const void *data)
         }
         default: break;
     }
+}
+
+// ===== UART0 硬件初始化（从 main.c 迁移）=====
+void init_uart(void)
+{
+    uart_config_t uart_config = {
+        .baud_rate = 115200, .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE, .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+    };
+    uart_param_config(UART_NUM_0, &uart_config);
+    uart_set_pin(UART_NUM_0, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    uart_driver_install(UART_NUM_0, 2048, 0, 0, NULL, 0);
+    ESP_LOGI(TAG, "UART0 initialized at 115200 baud");
+}
+
+// ===== 系统信息打印（从 main.c 迁移）=====
+void print_system_info_uart(void)
+{
+    char info_buf[512];
+    const uint32_t free_heap = esp_get_free_heap_size();
+    const uint32_t min_free_heap = esp_get_minimum_free_heap_size();
+    snprintf(info_buf, sizeof(info_buf),
+             "\r\n========== SYSTEM INFO ==========\r\n"
+             "  Free Heap: %lu  Min Free: %lu\r\n"
+             "  Camera: %s  Storage: %s\r\n"
+             "  Tag: %s  Mode: %s\r\n"
+             "==================================\r\n",
+             (unsigned long)free_heap, (unsigned long)min_free_heap,
+             g_camera_ready ? "OK" : "NO", g_storage_ready ? "OK" : "NO",
+             strlen(g_current_tag_id) ? g_current_tag_id : "N/A",
+             g_is_inventory_mode ? "INV" : "REG");
+    uart_write_bytes(UART_NUM_0, info_buf, strlen(info_buf));
 }
 
 // ===== 初始化 =====

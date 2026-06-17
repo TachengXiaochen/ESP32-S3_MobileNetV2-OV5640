@@ -4,6 +4,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "camera_module.h"
+#include "main.h"
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -11,11 +12,8 @@
 
 static const char *TAG = "api";
 
-// 外部引用
+// 外部引用（g_camera_ready/g_storage_ready/g_current_tag_id 已由 main.h 宏提供）
 extern SemaphoreHandle_t xCameraMutex;
-extern bool g_camera_ready;
-extern bool g_storage_ready;
-extern char g_current_tag_id[7];
 extern const char *be_get_state_string(void);
 extern int web_get_sta_count(void);
 

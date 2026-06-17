@@ -7,7 +7,8 @@
 extern "C" {
 #endif
 
-void uart_handler_0_init(void);
+void init_uart(void);                    // UART0 硬件初始化（从 main.c 迁移）
+void uart_handler_0_init(void);          // UART0 CLI 任务启动
 void uart_handler_0_on_event(be_event_t event, const void *data);
 
 // UI 引导函数（从 cmd_handler.h 迁移）

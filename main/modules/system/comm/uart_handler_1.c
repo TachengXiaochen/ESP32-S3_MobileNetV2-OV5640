@@ -28,6 +28,10 @@
 
 static const char *TAG = "uart1_handler";
 
+// 外部声明（集中管理，避免散落在函数体内）
+// 注：g_l610_client_id 已通过 main.h 宏映射到 g_ctx.l610_client_id
+extern void l610_manager_register_send_func(void (*)(const char *));
+
 #define WS63_UART_NUM    UART_NUM_1
 #define WS63_UART_BAUD   115200
 
@@ -101,8 +105,6 @@ static void uart1_handle_l610_connect(cJSON *json_obj)
     if (clean_session_item && cJSON_IsNumber(clean_session_item)) clean_session = (uint8_t)clean_session_item->valueint;
     if (keepalive_item && cJSON_IsNumber(keepalive_item)) keepalive = (uint16_t)keepalive_item->valueint;
 
-    extern esp_err_t l610_mqtt_set_user(const char *, const char *, const char *);
-    extern char g_l610_client_id[];
     if (strlen(g_l610_client_id) > 0) {
         l610_mqtt_set_user(g_l610_client_id, NULL, NULL);
     }
@@ -541,8 +543,6 @@ void uart_handler_1_on_event(be_event_t event, const void *data)
 void uart_handler_1_init(void)
 {
     uart1_uart_init();
-
-    extern void l610_manager_register_send_func(void (*)(const char *));
     l610_manager_register_send_func(uart_handler_1_send_json);
 
     xTaskCreate(uart1_recv_task, "uart1_recv_task", 16384, NULL, 5, NULL);
