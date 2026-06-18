@@ -163,13 +163,24 @@ static esp_err_t be_handle_register(be_channel_t channel, const char *tag_id, co
         g_be_cb(channel, BE_EVT_ERROR, &err);
         return ESP_ERR_NO_MEM;
     }
+    // 检查 JSON 中的 is_overwrite 标志（覆写模式跳过已存在检查）
+    bool allow_overwrite = false;
+    if (params != NULL && params[0] == '{') {
+        cJSON *pre_json = cJSON_Parse(params);
+        if (pre_json) {
+            cJSON *ow = cJSON_GetObjectItem(pre_json, "is_overwrite");
+            if (ow && cJSON_IsBool(ow)) allow_overwrite = (bool)ow->valueint;
+            cJSON_Delete(pre_json);
+        }
+    }
+
     bool has_existing = (asset_load(normalized, existing) == ESP_OK && existing->is_valid);
-    if (has_existing) {
-        // 资产已存在，拒绝覆盖注册。需通过 UART0 或 WS63 触发验证式更新。
+    if (has_existing && !allow_overwrite) {
+        // 资产已存在且未明确允许覆写，拒绝注册。
         ESP_LOGW(TAG, "Register rejected: tag_id=%s already exists (item=%s, qty=%lu)",
                  normalized, existing->item_name, (unsigned long)existing->quantity);
         be_error_info_t err = { .error_code = -1,
-            .error_msg = "Tag ID already exists, use inventory or verify-update" };
+            .error_msg = "Tag ID already exists, set is_overwrite:true to overwrite" };
         g_be_cb(channel, BE_EVT_ERROR, &err);
         free(existing);
         return ESP_ERR_INVALID_STATE;
@@ -667,8 +678,12 @@ void be_on_view_captured(int view_index)
     strncpy(prog.tag_id, g_current_tag_id, sizeof(prog.tag_id) - 1);
     prog.view_index = view_index;
     prog.total_steps = g_total_views;
+    // 从上下文读取推理任务写入的实际模糊分数
+    if (view_index >= 0 && view_index < 3)
+        prog.blur_score = g_ctx.view_blur_scores[view_index];
     g_be_cb(g_be_channel, BE_EVT_CAPTURE_PROGRESS, &prog);
-    ESP_LOGI(TAG, "View captured: %d/%d (view_idx=%d)", g_be_captured_views, g_total_views, view_index);
+    ESP_LOGI(TAG, "View captured: %d/%d (view_idx=%d, blur=%.1f)",
+             g_be_captured_views, g_total_views, view_index, (double)prog.blur_score);
 }
 
 bool be_on_all_views_done(void)

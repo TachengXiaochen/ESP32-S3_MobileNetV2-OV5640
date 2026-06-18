@@ -103,8 +103,7 @@ static void handle_capture_view(system_msg_t *msg)
         g_view_state = BE_VIEW_SIDE;
         if (g_inventory_state == INVENTORY_WAITING_SIDE) { g_inventory_state = INVENTORY_WAITING_TOP; show_registration_step3(); }
     } else g_view_state = BE_VIEW_TOP;
-    int vi = (msg->cmd == CMD_CAPTURE_FRONT) ? 0 : (msg->cmd == CMD_CAPTURE_SIDE) ? 1 : 2;
-    be_on_view_captured(vi);
+    // be_on_view_captured 已移至 inference_task.c，在推理完成后调用（此时 blur_score 真实可用）
 }
 
 // ========== 资产保存处理 ==========

@@ -82,6 +82,14 @@ bool camera_module_capture_and_process(float *feature_out, int feature_size, flo
     return mobilenet_extract_features(feature_out, feature_size, blur_score);
 }
 
+void *camera_module_capture_frame(void) {
+    if (!g_is_initialized) {
+        ESP_LOGE(TAG, "Camera not initialized!");
+        return NULL;
+    }
+    return esp_camera_fb_get();
+}
+
 bool camera_module_capture_jpeg(uint8_t **jpeg_buf, size_t *jpeg_len) {
     if (!g_is_initialized) {
         ESP_LOGE(TAG, "Camera not initialized!");

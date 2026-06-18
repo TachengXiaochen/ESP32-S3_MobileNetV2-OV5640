@@ -360,38 +360,39 @@ esp_err_t asset_save(const asset_record_t *record, bool *is_overwrite)
         }
     }
 
-    // ✅ 移除临时测试代码，减少不必要的IO操作
-    FILE *f = fopen(file_path, "wb");
-    if (!f) {
-        ESP_LOGE(TAG, "Failed to open file for writing: %s", file_path);
-        ESP_LOGE(TAG, "Error code: %d - %s", errno, strerror(errno));
-        
-        // 常见错误诊断
-        if (errno == ENOSPC) {
-            ESP_LOGE(TAG, "SD card is FULL! Please free up space.");
-        } else if (errno == EACCES) {
-            ESP_LOGE(TAG, "Permission denied. Check SD card write protection.");
-        } else if (errno == EIO) {
-            ESP_LOGE(TAG, "IO error. SD card may be corrupted or disconnected.");
+    // 【DMA 修复】fopen/fwrite 触发 SDMMC DMA 分配，内部 DRAM 碎片化时可能失败
+    #define ASSET_SAVE_RETRY  3
+    for (int retry = 0; retry < ASSET_SAVE_RETRY; retry++) {
+        esp_task_wdt_reset();
+        if (retry > 0) {
+            ESP_LOGW(TAG, "asset_save fopen retry %d/%d for %s", retry + 1, ASSET_SAVE_RETRY, file_path);
+            vTaskDelay(pdMS_TO_TICKS(200));
         }
-        
-        return ESP_FAIL;
+
+        FILE *f = fopen(file_path, "wb");
+        if (!f) {
+            ESP_LOGE(TAG, "Failed to open file for writing: %s (errno=%d, attempt %d/%d)",
+                     file_path, errno, retry + 1, ASSET_SAVE_RETRY);
+            continue;
+        }
+
+        ESP_LOGI(TAG, "File opened successfully, path length: %d bytes", strlen(file_path));
+
+        size_t written = fwrite(record, sizeof(asset_record_t), 1, f);
+        fclose(f);
+
+        if (written != 1) {
+            ESP_LOGE(TAG, "Failed to write asset record (attempt %d/%d)", retry + 1, ASSET_SAVE_RETRY);
+            continue;
+        }
+
+        ESP_LOGI(TAG, "Asset saved successfully for %s (%s)",
+                 identifier, overwrite ? "OVERWRITE" : "NEW");
+        return ESP_OK;
     }
 
-    ESP_LOGI(TAG, "File opened successfully, path length: %d bytes", strlen(file_path));
-
-    // 写入资产记录
-    size_t written = fwrite(record, sizeof(asset_record_t), 1, f);
-    fclose(f);
-
-    if (written != 1) {
-        ESP_LOGE(TAG, "Failed to write asset record");
-        return ESP_FAIL;
-    }
-
-    ESP_LOGI(TAG, "Asset saved successfully for %s (%s)", 
-             identifier, overwrite ? "OVERWRITE" : "NEW");
-    return ESP_OK;
+    ESP_LOGE(TAG, "Asset save FAILED after %d retries for %s", ASSET_SAVE_RETRY, identifier);
+    return ESP_FAIL;
 }
 
 /**
@@ -440,64 +441,74 @@ esp_err_t asset_load(const char *mac_address, asset_record_t *record)
 
     ESP_LOGI(TAG, "Loading asset from: %s", file_path);
 
-    // 【关键修复】在打开文件前，再次确保看门狗复位并短暂延迟
-    esp_task_wdt_reset();
-    vTaskDelay(pdMS_TO_TICKS(50));
+    // 【DMA 修复】fopen/fread 触发 SDMMC DMA 分配，内部 DRAM 碎片化时可能失败。
+    // 重试机制：短延迟让其他任务释放 DMA 缓冲后重试，与 opendir 修复策略一致。
+    #define ASSET_LOAD_RETRY  3
+    long file_size = 0;
+    size_t read_count = 0;
+    bool tried_old_format = false;
 
-    FILE *f = fopen(file_path, "rb");
-    if (!f) {
-        ESP_LOGE(TAG, "Failed to open file for reading: %s", file_path);
-        return ESP_FAIL;
-    }
+    for (int retry = 0; retry < ASSET_LOAD_RETRY; retry++) {
+        esp_task_wdt_reset();
+        if (retry > 0) {
+            ESP_LOGW(TAG, "asset_load fopen retry %d/%d for %s", retry + 1, ASSET_LOAD_RETRY, file_path);
+            vTaskDelay(pdMS_TO_TICKS(200));
+        }
 
-    // 获取文件大小用于向后兼容检测
-    fseek(f, 0, SEEK_END);
-    long file_size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    
-    // 先尝试新格式读取
-    size_t read_count = fread(record, sizeof(asset_record_t), 1, f);
-    fclose(f);
+        FILE *f = fopen(file_path, "rb");
+        if (!f) continue;
 
-    if (read_count == 1 && record->is_valid) {
-        const char *loaded_id = record->tag_id[0] ? record->tag_id : record->_legacy_mac;
-        ESP_LOGI(TAG, "Asset loaded successfully (new format) for %s", loaded_id);
-        return ESP_OK;
+        fseek(f, 0, SEEK_END);
+        file_size = ftell(f);
+        fseek(f, 0, SEEK_SET);
+
+        read_count = fread(record, sizeof(asset_record_t), 1, f);
+        fclose(f);
+
+        if (read_count == 1 && record->is_valid) {
+            const char *loaded_id = record->tag_id[0] ? record->tag_id : record->_legacy_mac;
+            ESP_LOGI(TAG, "Asset loaded successfully (new format) for %s", loaded_id);
+            return ESP_OK;
+        }
+        break;  // 文件打开成功但格式不匹配，不重试
     }
 
     // 向后兼容：检测旧格式并逐字段读取
     #define OLD_RECORD_SIZE (MAC_ADDR_LEN + 1 + 3 * FEATURE_VEC_SIZE * sizeof(float) + sizeof(bool))
-    
+
     if (file_size == OLD_RECORD_SIZE && read_count != 1) {
         ESP_LOGI(TAG, "Detected old format asset (%ld bytes), migrating...", file_size);
-        
-        // 重新打开文件
-        f = fopen(file_path, "rb");
-        if (!f) {
-            ESP_LOGE(TAG, "Failed to reopen file for old format read");
-            return ESP_FAIL;
-        }
-        
-        // 按旧格式逐字段读取到 _legacy_mac 字段
-        memset(record, 0, sizeof(asset_record_t));
-        fread(record->_legacy_mac, MAC_ADDR_LEN + 1, 1, f);
-        fread(record->front_feature, sizeof(float), FEATURE_VEC_SIZE, f);
-        fread(record->side_feature, sizeof(float), FEATURE_VEC_SIZE, f);
-        fread(record->top_feature, sizeof(float), FEATURE_VEC_SIZE, f);
-        fread(&record->is_valid, sizeof(bool), 1, f);
-        fclose(f);
-        
-        // 新字段填充默认值
-        memset(record->item_name, 0, sizeof(record->item_name));
-        record->storage_area = '?';
-        record->quantity = 0;
-        
-        if (record->is_valid) {
-            ESP_LOGI(TAG, "Old asset migrated successfully for %s", record->_legacy_mac);
-            return ESP_OK;
+
+        for (int retry = 0; retry < ASSET_LOAD_RETRY; retry++) {
+            esp_task_wdt_reset();
+            if (retry > 0) {
+                ESP_LOGW(TAG, "asset_load (old fmt) retry %d/%d", retry + 1, ASSET_LOAD_RETRY);
+                vTaskDelay(pdMS_TO_TICKS(200));
+            }
+
+            FILE *f = fopen(file_path, "rb");
+            if (!f) continue;
+
+            memset(record, 0, sizeof(asset_record_t));
+            fread(record->_legacy_mac, MAC_ADDR_LEN + 1, 1, f);
+            fread(record->front_feature, sizeof(float), FEATURE_VEC_SIZE, f);
+            fread(record->side_feature, sizeof(float), FEATURE_VEC_SIZE, f);
+            fread(record->top_feature, sizeof(float), FEATURE_VEC_SIZE, f);
+            fread(&record->is_valid, sizeof(bool), 1, f);
+            fclose(f);
+
+            memset(record->item_name, 0, sizeof(record->item_name));
+            record->storage_area = '?';
+            record->quantity = 0;
+
+            if (record->is_valid) {
+                ESP_LOGI(TAG, "Old asset migrated successfully for %s", record->_legacy_mac);
+                return ESP_OK;
+            }
+            break;
         }
     }
-    
+
     ESP_LOGE(TAG, "Failed to read asset record (file_size=%ld, expected_new=%u, expected_old=%u)",
              file_size, (unsigned)sizeof(asset_record_t), (unsigned)OLD_RECORD_SIZE);
     return ESP_FAIL;

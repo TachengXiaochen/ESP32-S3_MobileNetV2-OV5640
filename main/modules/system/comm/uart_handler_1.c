@@ -349,6 +349,8 @@ static void uart1_process_line(const char *json_str)
 // ===== UART1 接收任务 =====
 static void uart1_recv_task(void *pvParameters)
 {
+    // 注意：此任务不注册 WDT，因为同步处理 L610 AT 命令可能阻塞数秒
+    // 如需 WDT 保护，应在 L610 AT 操作前后手动 esp_task_wdt_reset()
     uint8_t *data = (uint8_t *)malloc(WS63_UART_BUF_SIZE);
     char *line_buf = (char *)malloc(WS63_UART_BUF_SIZE);
     int line_pos = 0;

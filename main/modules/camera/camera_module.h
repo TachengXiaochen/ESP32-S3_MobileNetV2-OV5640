@@ -29,6 +29,12 @@ bool camera_module_capture_and_process(float *feature_out, int feature_size, flo
 bool camera_module_capture_jpeg(uint8_t **jpeg_buf, size_t *jpeg_len);
 
 /**
+ * @brief 抓取一帧原始图像（仅帧抓取，不做推理）
+ * @return camera_fb_t* 帧缓冲指针，调用者必须调用 esp_camera_fb_return() 归还
+ */
+void *camera_module_capture_frame(void);
+
+/**
  * @brief 反初始化摄像头硬件（关闭摄像头）
  */
 void camera_module_deinit(void);

@@ -133,6 +133,9 @@ typedef struct {
 
     // L610 4G
     char l610_client_id[64];
+
+    // 各视图模糊分数（inference_task 写入，be_on_view_captured 读取）
+    float view_blur_scores[3];
 } app_context_t;
 
 extern app_context_t g_ctx;

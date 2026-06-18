@@ -193,7 +193,7 @@ static esp_err_t start_http_server(void)
     config.stack_size = 8192;
     config.task_priority = 5;
     config.server_port = 80;
-    config.max_open_sockets = 10;     // 默认7不够（MJPEG流+CSS+JS+API并发）
+    config.max_open_sockets = 7;      // LWIP_MAX_SOCKETS 默认上限，配合 lru_purge 释放旧连接
     config.lru_purge_enable = true;   // 连接池满时自动清理最久未用的连接
 
     esp_err_t ret = httpd_start(&g_httpd, &config);

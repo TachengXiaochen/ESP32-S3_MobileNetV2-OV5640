@@ -94,12 +94,12 @@ static void apply_laplacian(const uint8_t* gray, int w, int h, int16_t* laplacia
  * @return float 方差值
  */
 static float compute_variance(const int16_t* laplacian, int w, int h) {
+    // 标准拉普拉斯方差: Var(L) = E[(L - E[L])²]
     long long sum = 0;
     int count = 0;
     for (int y = 1; y < h - 1; y++) {
         for (int x = 1; x < w - 1; x++) {
-            int16_t val = laplacian[y * w + x];
-            sum += val * val;
+            sum += laplacian[y * w + x];
             count++;
         }
     }
@@ -109,8 +109,7 @@ static float compute_variance(const int16_t* laplacian, int w, int h) {
     float variance = 0.0f;
     for (int y = 1; y < h - 1; y++) {
         for (int x = 1; x < w - 1; x++) {
-            int16_t val = laplacian[y * w + x];
-            float diff = (float)(val * val) - mean;
+            float diff = (float)laplacian[y * w + x] - mean;
             variance += diff * diff;
         }
     }

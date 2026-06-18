@@ -21,6 +21,15 @@ bool mobilenet_init(void);
 bool mobilenet_extract_features(float *feature_vec, int feature_size, float *blur_score);
 
 /**
+ * @brief 从已抓取的帧中提取特征（不调用 esp_camera_fb_get/return）
+ * @param fb 已抓取的帧缓冲（调用者负责 fb_return）
+ * @param feature_vec 输出特征向量
+ * @param feature_size 特征向量大小
+ * @param blur_score 可选输出模糊分数
+ */
+bool mobilenet_extract_features_from_frame(void *fb, float *feature_vec, int feature_size, float *blur_score);
+
+/**
  * @brief 释放MobileNetV2模型资源
  */
 void mobilenet_deinit(void);

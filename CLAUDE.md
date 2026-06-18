@@ -1,7 +1,7 @@
 # ESP32-S3 CAM AI 开发规范
 
 > **项目名称**: ESP32-S3 MobileNetV2-OV5640 智能资产管理系统  
-> **版本**: v3.6-dev (2026-06-17，实时更新)  
+> **版本**: v3.6 (2026-06-18)  
 > **芯片平台**: ESP32-S3 (双核240MHz, 带PSRAM)  
 > **ESP-IDF版本**: >= 5.3.0  
 > **主要功能**: 基于MobileNetV2的三视图资产识别与盘点系统  
@@ -673,6 +673,27 @@ extern float g_front_feature[];      // 特征缓冲区（PSRAM 对齐）
 | `extern` 与宏冲突 | `extern char g_l610_client_id[];` 被宏展开为非法语法 | 删除 extern，宏自动提供访问 |
 | CLI 绕过业务层 | `uart_handler_0.c` 直接写 `g_be_state` / `g_be_task` | 调试路径可接受，生产路径已修复 |
 
+#### Git 工作流
+
+- **禁止自动提交**：代码修改完成后，**不要**立即 `git commit`。等待用户手动编译测试（`idf.py build` + 烧录验证），确认无误后由用户指示再提交。
+- **修复后必须写报告**：每次 bug 修复或功能改动完成后，将修复内容、影响范围、验证方法写入 `docs/archive/` 目录下的报告文件（命名格式：`YYYYMMDD_<简短描述>.md`）。
+- **报告模板**：
+  ```markdown
+  # <标题>
+  > 日期: YYYY-MM-DD  提交: <commit-hash>
+  
+  ## 问题
+  <问题描述>
+  
+  ## 修复
+  | 文件 | 改动 |
+  |------|------|
+  | `xxx.c:行号` | <改动说明> |
+  
+  ## 验证
+  <验证步骤>
+  ```
+
 ---
 
 ### 错误处理策略
@@ -950,6 +971,7 @@ ESP_LOGI(TAG, "Inference time: %lld ms", elapsed);
 - 📝 [docs/archive/20260608_GAP_FEATURE_AND_FIXES.md](docs/archive/20260608_GAP_FEATURE_AND_FIXES.md) - GAP特征和匹配修复报告
 - 📝 [docs/archive/20260609_WEB_LIVE_PREVIEW.md](docs/archive/20260609_WEB_LIVE_PREVIEW.md) - Web实时预览实施报告
 - 📝 [docs/archive/20260617_MAIN_C_REFACTOR.md](docs/archive/20260617_MAIN_C_REFACTOR.md) - main.c去上帝化重构报告
+- 📝 [docs/archive/20260618_DMA_MEMORY_EXHAUSTION_FIX.md](docs/archive/20260618_DMA_MEMORY_EXHAUSTION_FIX.md) - v3.6 稳定性修复报告
 
 ### WS63端文档
 - 📖 [ws63/README.md](ws63/README.md) - WS63网关项目说明
@@ -974,7 +996,7 @@ ESP_LOGI(TAG, "Inference time: %lld ms", elapsed);
 ### 维护者
 - **ESP32-S3端**: TcXc
 - **WS63端**: Star Flash Smart Inventory Team
-- **最后更新**: 2026-06-09
+- **最后更新**: 2026-06-18
 
 ---
 
