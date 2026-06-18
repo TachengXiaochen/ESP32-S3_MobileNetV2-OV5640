@@ -1,10 +1,10 @@
 # 星闪双模资产盘点系统 — 端到端通信协议汇总
 
-> **文档版本**: v1.1  
-> **最后更新**: 2026-05-27  
+> **文档版本**: v1.2  
+> **最后更新**: 2026-06-18  
 > **适用项目**: 星闪双模资产盘点系统  
 > **定位**: 入口文档 — 汇总三端通信全貌、核心流程、映射表  
-> **v1.1 更新**: 同步屏协议 v2.4（控件重命名+Page5设置页+cancel帧）；文档路径更新
+> **v1.2 更新**: 同步 ESP32 固件 v3.6、WS63 协议 v3.6、串口屏协议 v2.5
 > **详细参考**: 字段定义和完整规范请查阅各专业文档
 
 ---
@@ -14,8 +14,8 @@
 | 文档 | 路径 | 职责 |
 |------|------|------|
 | **END_TO_END_PROTOCOL.md** (本文档) | `docs/PROTOCOL/END_TO_END_PROTOCOL.md` | 入口：流程图、映射表、对照表 |
-| ESP32_WS63_PROTOCOL.md v3.3 | `docs/PROTOCOL/ESP32_WS63_PROTOCOL.md` | WS63↔ESP32 UART1 JSON 协议完整规范 |
-| WS63_MONITOR_PROTOCOL.md v2.4 | `docs/PROTOCOL/WS63_MONITOR_PROTOCOL.md` | WS63↔串口屏 UART2 CSV 协议完整规范 |
+| ESP32_WS63_PROTOCOL.md v3.6 | `docs/PROTOCOL/ESP32_WS63_PROTOCOL.md` | WS63↔ESP32 UART1 JSON 协议完整规范 |
+| WS63_MONITOR_PROTOCOL.md v2.5 | `docs/PROTOCOL/WS63_MONITOR_PROTOCOL.md` | WS63↔串口屏 UART2 CSV 协议完整规范 |
 | MONITOR_CODE.md | `docs/MONITOR_CODE.md` | 淘晶驰T1端侧控件、变量、事件代码 |
 | fix_plan.md | `docs/fix_plan.md` | WS63开发者快速参考卡 |
 
@@ -58,7 +58,7 @@
 
 | 部件 | 当前版本 | 协议文档版本 | Tag ID 格式 | 关键特性 |
 |------|---------|-------------|------------|---------|
-| ESP32-S3 固件 | v3.3 | PROTOCOL.md v3.3 | `0x0001` (含0x前缀) | 验证式更新、分步出库、分页列表、ping心跳 |
+| ESP32-S3 固件 | v3.6 | PROTOCOL.md v3.6 | `0x0001` (含0x前缀) | 验证式更新、分步出库、分页列表、ping心跳 |
 | WS63 固件 | dev | CLAUDE.md v1.0 | `0x0001` (内部) | SLE扫描+连接、Tag映射表、NV持久化 |
 | 串口屏固件 | v1.0 | 屏协议 v2.4 | `0001` (不含0x前缀) | 5页面: 入库/出库/盘点/查找/设置 |
 | BS21标签 | — | — | MAC地址 (硬件) | SLE广播+通知+深度休眠 |

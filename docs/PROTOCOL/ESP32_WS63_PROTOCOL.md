@@ -1,10 +1,12 @@
 # WS63 ↔ ESP32-S3 通信协议规范
 
-> **文档版本**: v3.4  
-> **最后更新**: 2026-06-05  
+> **文档版本**: v3.6  
+> **最后更新**: 2026-06-18  
 > **适用项目**: CAM_AI (ESP32-S3 视觉感知物资管理子节点)  
 > **主要更新**: 
-> - **v3.4**: ⭐ 架构重构 + GPIO 迁移（引入 business_executor 业务执行器，UART 处理器重构，GPIO17/18→47/21 解决摄像头冲突，outbound 分步控制，TX 诊断日志，step 动态化，补全 ping/sys_info/list_assets_page/get_asset 命令）⭐NEW
+> - **v3.6**: ⭐ 架构重构 + 稳定性（main.c 去上帝化，app_context_t 全局变量分组，DMA 重试，互斥锁分离，blur 检测修正+传播，阈值 0.90 统一）
+> - **v3.5**: 性能优化（AI推理 30-60s→8.5s，GAP 1280维特征，纯余弦+阈值0.90，Web实时预览）
+> - **v3.4**: ⭐ 架构重构 + GPIO 迁移（引入 business_executor 业务执行器，UART 处理器重构，GPIO17/18→47/21 解决摄像头冲突，outbound 分步控制）
 > - **v3.3**: 补全缺失命令（delete/cancel/get_asset/ping），完善下行命令体系
 > - **v3.2**: Tag ID 改造（标识符从MAC地址升级为16位Tag ID，新增验证式更新流程）⭐
 > - v3.1: L610 4G模块完整集成（MQTT云端通信、主动上报机制）
@@ -203,7 +205,7 @@
 }
 ```
 
-#### 模式B：验证式更新（已有资产累加）⭐NEW
+#### 模式B：验证式更新（已有资产累加）⭐
 
 **触发条件**：当 `tag_id` 已存在的资产记录，且命令中**不包含** `item_name` 字段
 
@@ -225,7 +227,7 @@ ESP32 → WS63: {"type":"verification_start","tag_id":"0x0001",
                 "required_view":"front","message":"请拍摄正视图验证"}
 WS63 → ESP32: {"cmd":"capture","view":"front"}
 ESP32: 拍摄正视图 → 提取特征 → 计算相似度
-├─ 相似度≥0.75 ✅ → 累加数量: 50+20=70
+├─ 相似度≥0.90 ✅ → 累加数量: 50+20=70
 │  ESP32 → WS63: {"type":"task_done","task":"register","result":"success_updated",
 │                  "tag_id":"0x0001","item_name":"扳手",
 │                  "previous_qty":50,"added_qty":20,"new_qty":70,
@@ -263,7 +265,7 @@ ESP32: 拍摄正视图 → 提取特征 → 计算相似度
   "new_qty": 70,
   "verification": {
     "confidence": 0.92,
-    "threshold": 0.75,
+    "threshold": 0.90,
     "passed": true
   }
 }
@@ -279,7 +281,7 @@ ESP32: 拍摄正视图 → 提取特征 → 计算相似度
     "tag_id": "0x0001",
     "existing_item": "扳手",
     "captured_similarity": 0.45,
-    "threshold": 0.75,
+    "threshold": 0.90,
     "suggestion": "Please check if correct item is placed"
   }
 }
@@ -349,7 +351,7 @@ ESP32: 拍摄正视图 → 提取特征 → 计算相似度
   "front_confidence": 0.92,
   "side_confidence": 0.85,
   "top_confidence": 0.83,
-  "threshold": 0.75
+  "threshold": 0.90
 }
 ```
 
@@ -442,7 +444,7 @@ WS63                           ESP32
   "item_name": "扳手",
   "is_match": true,
   "confidence": 0.92,
-  "threshold": 0.75,
+  "threshold": 0.90,
   "original_qty": 50,
   "remove_qty": 5,
   "remaining_qty": 45,
@@ -452,7 +454,7 @@ WS63                           ESP32
 
 ---
 
-### 6.4 capture - 分步拍摄控制 ⭐NEW v3.0
+### 6.4 capture - 分步拍摄控制 ⭐ v3.0
 
 **命令格式**：
 ```json
@@ -811,7 +813,7 @@ FINALIZING ──[cancel]──► CLEANING ──[完成]──► IDLE
   "sd_total_mb": 7580,
   "sd_used_mb": 1250,
   "sd_free_mb": 6330,
-  "firmware_version": "v3.2",
+  "firmware_version": "v3.6",
   "state": "idle"
 }
 ```
@@ -866,7 +868,7 @@ FINALIZING ──[cancel]──► CLEANING ──[完成]──► IDLE
   "new_qty": 70,
   "verification": {
     "confidence": 0.92,
-    "threshold": 0.75,
+    "threshold": 0.90,
     "passed": true
   }
 }
@@ -919,7 +921,7 @@ FINALIZING ──[cancel]──► CLEANING ──[完成]──► IDLE
 
 ---
 
-### 7.4 asset_info - 资产信息查询结果 ⭐NEW v3.4
+### 7.4 asset_info - 资产信息查询结果 ⭐ v3.4
 
 **触发时机**：收到 `outbound` 或 `inventory` 命令后，立即返回资产基本信息（在硬件初始化之前）
 
@@ -953,7 +955,7 @@ FINALIZING ──[cancel]──► CLEANING ──[完成]──► IDLE
 
 ---
 
-### 7.5 pong - 心跳响应 ⭐NEW v3.4
+### 7.5 pong - 心跳响应 ⭐ v3.4
 
 **触发时机**：收到 `ping` 命令后立即响应
 
@@ -984,7 +986,7 @@ FINALIZING ──[cancel]──► CLEANING ──[完成]──► IDLE
 
 ---
 
-### 7.6 sys_info - 系统信息响应 ⭐NEW v3.4
+### 7.6 sys_info - 系统信息响应 ⭐ v3.4
 
 **触发时机**：收到 `sys_info` 命令后响应
 
@@ -1042,7 +1044,7 @@ WS63                          ESP32
  │◄── task_done ────────────│
 ```
 
-### 8.3 出库流程（分步控制）⭐NEW v3.4
+### 8.3 出库流程（分步控制）⭐ v3.4
 
 ```
 WS63                           ESP32
@@ -1458,7 +1460,7 @@ AT+MQTTLOG=1    # 开启MQTT详细日志
 
 ---
 
-### 14.4 mqtt_publish_result - MQTT发布结果 ⭐NEW v3.1
+### 14.4 mqtt_publish_result - MQTT发布结果 ⭐ v3.1
 
 **消息格式**：
 ```
@@ -1499,7 +1501,7 @@ AT+MQTTLOG=1    # 开启MQTT详细日志
 
 ---
 
-### 14.5 l610_at_result - AT指令结果 ⭐NEW v3.1
+### 14.5 l610_at_result - AT指令结果 ⭐ v3.1
 
 **消息格式**：
 ```
@@ -1560,7 +1562,7 @@ AT+MQTTLOG=1    # 开启MQTT详细日志
 
 ---
 
-### 14.6 l610_status - L610模块状态 ⭐NEW v3.1
+### 14.6 l610_status - L610模块状态 ⭐ v3.1
 
 **消息格式**：
 ```
@@ -1681,7 +1683,7 @@ WS63                          ESP32                         L610
 
 ---
 
-## 16. 主动上报机制 ⭐NEW v3.1
+## 16. 主动上报机制 ⭐ v3.1
 
 ### 16.1 机制说明
 
@@ -1729,7 +1731,7 @@ void protocol_handler_init(void) {
 
 ## 18. 错误处理与重试
 
-### 18.1 AT指令重试机制 ⭐NEW v3.1
+### 18.1 AT指令重试机制 ⭐ v3.1
 
 **问题**：单次AT超时直接返回错误，网络波动时容易误判模块失联
 
@@ -1747,7 +1749,7 @@ void protocol_handler_init(void) {
 
 ---
 
-### 18.2 Payload长度保护 ⭐NEW v3.1
+### 18.2 Payload长度保护 ⭐ v3.1
 
 **限制**：
 - Payload限制：最大1024字节
@@ -1760,7 +1762,7 @@ void protocol_handler_init(void) {
 
 ---
 
-### 18.3 资源清理机制 ⭐NEW v3.1
+### 18.3 资源清理机制 ⭐ v3.1
 
 **清理内容**：
 - 销毁3个信号量（g_mqtt_open_sem, g_mqtt_pub_sem, g_mqtt_close_sem）
@@ -1862,7 +1864,9 @@ void protocol_handler_init(void) {
 
 ### B. 版本历史
 
-- **v3.4** (2026-06-05): ⭐ 架构重构 + GPIO 迁移（引入 business_executor 业务执行器，UART 处理器重构，GPIO17/18→47/21 解决摄像头冲突，outbound 分步控制，TX 诊断日志，step 动态化，补全 ping/sys_info/list_assets_page/get_asset 命令）⭐NEW
+- **v3.6** (2026-06-18): ⭐ 架构重构 + 稳定性（main.c 去上帝化，app_context_t 全局变量分组，DMA 重试，互斥锁分离，blur 检测修正+传播，阈值 0.90 统一）
+- **v3.5** (2026-06-09): ⭐ 性能优化（AI推理 30-60s→8.5s，GAP 1280维特征，纯余弦+阈值0.90，Web实时预览）
+- **v3.4** (2026-06-05): ⭐ 架构重构 + GPIO 迁移（引入 business_executor，GPIO17/18→47/21，outbound 分步控制）
 - **v3.3** (2026-05-26): 补全缺失命令（delete/cancel/get_asset/ping），完善下行命令体系
 - **v3.2** (2026-05-19): Tag ID 改造（标识符升级、验证式更新流程）⭐
 - **v3.1** (2026-05-10): L610 4G模块完整集成
@@ -1871,7 +1875,7 @@ void protocol_handler_init(void) {
 
 ---
 
-**文档版本**: v3.4  
+**文档版本**: v3.6  
 **最后更新**: 2026-06-05  
 **维护者**: TcXc  
 **反馈邮箱**: 202500201056@stumail.sztu.edu.cn

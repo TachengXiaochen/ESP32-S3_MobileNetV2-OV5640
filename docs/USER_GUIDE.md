@@ -1,8 +1,8 @@
-# ESP32-S3 CAM AI 资产管理系统使用指南 v3.5
+# ESP32-S3 CAM AI 资产管理系统使用指南 v3.6
 
 ## 📖 功能概述
 
-本系统实现了基于 **Tag ID** 的资产管理功能，支持**三视图（正面、侧面、顶部）**拍照注册和**智能盘点比对**。系统采用**模块化架构**和**多任务并发设计**，通过 **MobileNetV2 深度学习模型**实现高精度物品识别。**v3.5** 核心升级：AI推理速度提升80-85%（30-60s→8.5s），GAP 1280维语义特征提取，匹配算法修复为纯余弦相似度+阈值0.90，状态机bug修复，Web实时预览调试功能。
+本系统实现了基于 **Tag ID** 的资产管理功能，支持**三视图（正面、侧面、顶部）**拍照注册和**智能盘点比对**。系统采用**模块化架构**和**多任务并发设计**，通过 **MobileNetV2 深度学习模型**实现高精度物品识别。**v3.6** 核心升级：main.c 去上帝化重构，全局变量分组，运行时稳定性修复（DMA重试、互斥锁分离、blur检测修正+传播）。
 
 ### ✨ 核心特性（V3.5完整版）
 
@@ -15,17 +15,17 @@
 7. **📋 资产详细信息** ⭐v2.5：物品名称、存放区域、数量完整管理
 8. **🔀 双线程架构** ⭐v2.5：拍摄与推理分离，响应速度提升37倍
 9. **🌟 智能盘点模式**：自适应帧数（1-3帧）+ **加权综合置信度分析**
-10. **🗑️ 资产删除功能** ⭐NEW：一键删除资产及其关联图片，支持二次确认
-11. **💡 LED状态指示** ⭐NEW：WS2812 RGB LED实时反馈系统状态
-12. **🎯 多帧融合** ⭐NEW：每次拍摄采集1-3帧图像（自适应），提升准确率5-8%
-13. **🔍 模糊度检测** ⭐NEW v2.6：拉普拉斯方差算法自动过滤模糊图像，降采样2×提速4倍
+10. **🗑️ 资产删除功能** ⭐：一键删除资产及其关联图片，支持二次确认
+11. **💡 LED状态指示** ⭐：WS2812 RGB LED实时反馈系统状态
+12. **🎯 多帧融合** ⭐：每次拍摄采集1-3帧图像（自适应），提升准确率5-8%
+13. **🔍 模糊度检测** ⭐ v2.6：拉普拉斯方差算法自动过滤模糊图像，降采样2×提速4倍
 14. **📡 WS63协议支持** ⭐v3.0：JSON格式UART通信，支持主控设备远程调度
 15. **🏗️ business_executor架构** ⭐v3.4：统一业务逻辑处理，双通道输出（CLI/JSON）
 16. **🌐 Web实时预览** ⭐v3.5：WiFi SoftAP + MJPEG流 + 系统状态面板（调试用）
 17. **TF卡存储**：使用 MicroSD/TF 卡存储所有资产数据
 18. **实时置信度反馈**：每次推理提供置信度评分，量化识别质量
 19. **存储空间监控**：实时监控TF卡使用情况，多级预警机制
-20. **🚪 强制退出** ⭐NEW：任何状态下输入 `exit` 立即返回主菜单
+20. **🚪 强制退出** ⭐：任何状态下输入 `exit` 立即返回主菜单
 
 ---
 
@@ -37,7 +37,7 @@
 - ✅ OV5640摄像头模块
 - ✅ **MicroSD/TF卡（必需，FAT32格式，建议≥8GB）**
 - ✅ USB数据线
-- ✅ **WS2812 RGB LED（可选，连接到GPIO48，需要5V供电）** ⭐NEW
+- ✅ **WS2812 RGB LED（可选，连接到GPIO48，需要5V供电）** ⭐
 
 **重要提示**：系统仅支持 TF卡（MicroSD卡）存储，使用前请确保已插入格式化的 TF卡。
 
@@ -65,7 +65,7 @@ idf.py flash monitor -p COM3
 
 | 命令 | 功能 | 示例 | 适用状态 |
 |------|------|------|----------|
-| `XX:XX:XX:XX:XX:XX` | 输入MAC地址初始化系统 | `AA:BB:CC:DD:EE:FF` | 等待MAC状态 / 盘点模式下 |
+| `0x0001` | 输入Tag ID初始化系统 | `0x0001` | 等待MAC状态 / 盘点模式下 |
 
 ### 📦 存储管理命令
 
@@ -74,7 +74,7 @@ idf.py flash monitor -p COM3
 | `i` | **查看TF卡存储详情**（容量/使用率） | `i` |
 | `l` | 列出所有已注册资产 + 存储统计 | `l` |
 
-### 📸 资产注册命令（MAC地址输入后）
+### 📸 资产注册命令（Tag ID输入后）
 
 | 命令 | 功能 | 说明 |
 |------|------|------|
@@ -88,7 +88,7 @@ idf.py flash monitor -p COM3
 |------|------|----------|
 | `c` 或 `C` | **启动智能盘点模式** | 引导式三视图采集 + 加权综合判断 |
 
-### 🗑️ 资产删除命令 ⭐NEW
+### 🗑️ 资产删除命令 ⭐
 
 | 命令 | 功能 | 工作流程 |
 |------|------|----------|
@@ -99,7 +99,7 @@ idf.py flash monitor -p COM3
 | 命令 | 功能 | 说明 |
 |------|------|------|
 | `help` 或 `?` | 显示帮助信息 | 查看所有可用命令 |
-| `exit` 或 `quit` | **强制退出** ⭐NEW | 任何状态下立即返回主菜单 |
+| `exit` 或 `quit` | **强制退出** ⭐ | 任何状态下立即返回主菜单 |
 
 ---
 
@@ -121,13 +121,13 @@ idf.py flash monitor -p COM3
 # 2. 选择注册模式：
 r
 
-# 3. 输入物品标签上的MAC地址：
-AA:BB:CC:DD:EE:FF
+# 3. 输入物品标签上的Tag ID：
+0x0001
    
 # 4. 系统自动初始化，LED变为绿色常亮，提示：
 [SYSTEM] Hardware initialized.
 ========== REGISTRATION ==========
-  Target MAC: AA:BB:CC:DD:EE:FF
+  Target Tag ID: 0x0001
   Camera: POWER ON
   [STEP 1/3] Capture FRONT view
            -> Send 'f' to capture
@@ -141,12 +141,12 @@ t  # 拍摄顶部，LED闪烁3次，自动保存三视图到TF卡
 # 6. 完成注册：
 ✅ REGISTRATION COMPLETE!
   Asset saved to SD card successfully.    ← 首次注册
-  MAC: AA:BB:CC:DD:EE:FF
+  Tag ID: 0x0001
   Camera: POWER OFF
   LED变为红色常亮
 
 #### 💡 资产覆盖说明
-- **自动覆盖**：如果重新注册相同MAC地址，系统会自动覆盖原有数据
+- **自动覆盖**：如果重新注册相同Tag ID，系统会自动覆盖原有数据
 - **明确提示**：
   - 首次注册：`Asset saved to SD card successfully.`
   - 覆盖更新：`Asset UPDATED (overwritten) on SD card.`
@@ -160,12 +160,12 @@ t  # 拍摄顶部，LED闪烁3次，自动保存三视图到TF卡
 # 1. 系统启动后选择盘点模式：
 c
 
-# 2. 输入要盘点的MAC地址：
-AA:BB:CC:DD:EE:FF
+# 2. 输入要盘点的Tag ID：
+0x0001
 
 # 3. LED变为蓝色常亮，系统引导拍摄：
 ========== INVENTORY ============
-  Target MAC: AA:BB:CC:DD:EE:FF
+  Target Tag ID: 0x0001
   Camera: POWER ON
   [STEP 1/3] Capture FRONT view
            -> Send 'f' to capture
@@ -177,58 +177,49 @@ AA:BB:CC:DD:EE:FF
 [STEP 3/3] Capture TOP view
          -> Send 't' to capture and analyze
 
-# 4. 输出分析报告（包含混合相似度详细数据）：
-========== INVENTORY RESULT (OPTIMIZED) ==========
+# 4. 输出分析报告（纯余弦相似度，v3.5+）：
+========== INVENTORY RESULT ==========
   [FRONT VIEW]
-    Cosine:      0.9234
-    Euclidean:   0.8876
-    Mixed:       0.9127
     Confidence:  0.9500 (×0.5)
   [SIDE VIEW]
-    Cosine:      0.8956
-    Euclidean:   0.8623
-    Mixed:       0.8856
     Confidence:  0.9100 (×0.3)
   [TOP VIEW]
-    Cosine:      0.9412
-    Euclidean:   0.9034
-    Mixed:       0.9299
     Confidence:  0.9650 (×0.2)
   ------------------------------------------------
   Weighted Confidence: 0.9285
-  Dynamic Threshold:   0.75
+  Threshold:   0.90
   ✅ MATCH - Same Asset
-  MAC: AA:BB:CC:DD:EE:FF
+  Tag ID: 0x0001
 ===================================================
 
 #### 匹配判断说明
-- **加权置信度 ≥ 0.75** → ✅ MATCH - Same Asset（确认为同一物品）
-- **加权置信度 < 0.75** → ❌ NO MATCH - Different Asset（不是同一物品）
-- **阈值可调**：可根据实际应用场景调整 `MATCH_THRESHOLD` 参数（默认0.75）
-- **混合相似度**：结合余弦相似度(70%)和欧氏距离(30%)，提供更准确的评估
+- **加权置信度 ≥ 0.90** → ✅ MATCH - Same Asset（确认为同一物品）
+- **加权置信度 < 0.90** → ❌ NO MATCH - Different Asset（不是同一物品）
+- **匹配算法**：纯余弦相似度（v3.5 起移除无效 Euclidean 混合）
+- **阈值**：统一 0.90，匹配更严格
 
 ```
 
 **优势**：
 - ✅ 引导式流程，防止误操作
 - ✅ 实时置信度分析，识别质量可量化
-- ✅ 加权综合判断，准确率 >95%（多帧融合+混合相似度）
+- ✅ 加权综合判断，准确率 >95%（多帧融合+纯余弦相似度 v3.5+）
 - ✅ LED视觉反馈，直观了解当前状态
 
 ---
 
-### 场景3：出库资产 ⭐NEW V2.5
+### 场景3：出库资产 ⭐ V2.5
 
 ```
 # 1. 系统启动后选择出库模式：
 o
 
-# 2. 输入要出库的MAC地址：
-AA:BB:CC:DD:EE:FF
+# 2. 输入要出库的Tag ID：
+0x0001
 
 # 3. 系统显示资产详细信息：
 ========== OUTBOUND MODE ==========
-  MAC: AA:BB:CC:DD:EE:FF
+  Tag ID: 0x0001
   Item: Wooden Chair
   Area: A
   Stock: 10
@@ -240,7 +231,7 @@ AA:BB:CC:DD:EE:FF
 
 # 5. 系统引导拍摄（仅正面视图）：
 ========== OUTBOUND ============
-  MAC:      AA:BB:CC:DD:EE:FF
+  Tag ID:      0x0001
   Remove:   5
   [STEP 1/1] Capture FRONT view
            -> Send 'f' to capture
@@ -252,21 +243,18 @@ f
 # 7. 系统自动比对并更新库存：
 ========== OUTBOUND RESULT ==========
   [FRONT VIEW]
-    Cosine:      0.9234
-    Euclidean:   0.8876
-    Mixed:       0.9127
     Confidence:  0.9500
   ----------------------------------------
-  Threshold:    0.75
+  Threshold:    0.90
   ✅ MATCH - Same Asset
-  MAC: AA:BB:CC:DD:EE:FF
+  Tag ID: 0x0001
   Original Qty: 10
   Remove Qty:   5
 =========================================
 
 ✅ OUTBOUND COMPLETE!
   Removed: 5 | Remaining: 5
-  MAC: AA:BB:CC:DD:EE:FF
+  Tag ID: 0x0001
   Original image saved.
   Camera: POWER OFF
 ```
@@ -284,14 +272,14 @@ f
 
 ---
 
-### 场景4：注册新资产（V2.5升级版）⭐
+### 场景4：注册新资产（升级版）⭐
 
 ```
 # 1. 系统启动后选择注册模式：
 r
 
-# 2. 输入MAC地址：
-AA:BB:CC:DD:EE:FF
+# 2. 输入Tag ID：
+0x0001
 
 # 3. 输入物品名称：
 Wooden Chair
@@ -304,7 +292,7 @@ A
 
 # 6. 系统显示摘要并初始化硬件：
 ========== REGISTRATION SUMMARY ==========
-  MAC:          AA:BB:CC:DD:EE:FF
+  Tag ID:          0x0001
   Item Name:    Wooden Chair
   Storage Area: A
   Quantity:     10
@@ -313,7 +301,7 @@ A
 
 # 7. LED变为绿色常亮，系统引导拍摄：
 ========== REGISTRATION ==========
-  Target MAC: AA:BB:CC:DD:EE:FF
+  Target Tag ID: 0x0001
   Camera: POWER ON
   [STEP 1/3] Capture FRONT view
            -> Send 'f' to capture
@@ -328,7 +316,7 @@ A
 # 8. 拍摄完成后自动保存：
 ✅ REGISTRATION COMPLETE!
   Asset saved to SD card successfully.
-  MAC: AA:BB:CC:DD:EE:FF
+  Tag ID: 0x0001
   Camera: POWER OFF
 ```
 
@@ -339,7 +327,7 @@ A
 
 ---
 
-### 场景5：删除资产 ⭐NEW
+### 场景5：删除资产 ⭐
 
 ```
 # 1. 系统启动后选择删除模式：
@@ -355,22 +343,22 @@ d
 ===========================
 
 === Registered Assets (SD Card) ===
-  [1] MAC: AA:BB:CC:DD:EE:FF
-  [2] MAC: 11:22:33:44:55:66
+  [1] Tag ID: 0x0001
+  [2] Tag ID: 11:22:33:44:55:66
 
 ========== DELETE MODE ==========
   Please input MAC address to delete:
-  Format: XX:XX:XX:XX:XX:XX
-  Example: AA:BB:CC:DD:EE:FF
+  Format: 0x0001
+  Example: 0x0001
 ===================================
 [GUIDE] Input MAC address: 
 
-# 3. 输入要删除的MAC地址：
-AA:BB:CC:DD:EE:FF
+# 3. 输入要删除的Tag ID：
+0x0001
 
 # 4. 系统检查资产是否存在，显示确认提示：
 ⚠️  CONFIRM DELETE ASSET?
-  MAC: AA:BB:CC:DD:EE:FF
+  Tag ID: 0x0001
   Press 'y' to confirm, any other key to cancel: 
 
 # 5. 输入 'y' 确认删除：
@@ -378,7 +366,7 @@ y
 
 # 6. 删除成功，系统自动刷新资产列表：
 ✅ ASSET DELETED SUCCESSFULLY!
-Asset with MAC AA:BB:CC:DD:EE:FF has been removed.
+Asset with MAC 0x0001 has been removed.
 
 [ASSET LIST]
 
@@ -389,7 +377,7 @@ Asset with MAC AA:BB:CC:DD:EE:FF has been removed.
 ===========================
 
 === Registered Assets (SD Card) ===
-  [1] MAC: 11:22:33:44:55:66
+  [1] Tag ID: 11:22:33:44:55:66
 
 ========== MAIN MENU ==========
   r - Register new asset
@@ -429,7 +417,7 @@ i
   Min Free Heap:  100000 bytes
   Camera State:   READY
   Storage State:  READY
-  Current MAC:    N/A
+  Current Tag ID:    N/A
   Mode:           REGISTRATION
 ===========================================
 
@@ -446,13 +434,13 @@ l
 ===========================
 
 === Registered Assets (SD Card) ===
-  [1] MAC: AA:BB:CC:DD:EE:FF
-  [2] MAC: 11:22:33:44:55:66
+  [1] Tag ID: 0x0001
+  [2] Tag ID: 11:22:33:44:55:66
 Total: 2 assets
 ========================
 ```
 
-### 场景7：强制退出 ⭐NEW
+### 场景7：强制退出 ⭐
 
 ```
 # 在任何状态下（如拍摄过程中）输入 exit 或 quit：
@@ -477,12 +465,12 @@ LED变为红色常亮
 
 **使用场景**：
 - 拍摄过程中想取消操作
-- MAC地址输入错误需要重新选择模式
+- Tag ID输入错误需要重新选择模式
 - 系统异常时强制复位
 
 ---
 
-## 📡 WS63 协议使用说明 ⭐NEW V3.0
+## 📡 WS63 协议使用说明 ⭐ V3.0
 
 ### 概述
 
@@ -492,8 +480,8 @@ WS63 协议是 ESP32-S3 与主控设备（WS63）之间的通信协议，通过 
 
 | 信号 | ESP32-S3 引脚 | WS63 引脚 | 方向 | 说明 |
 |------|-------------|----------|------|------|
-| UART TX | **GPIO17** | RX | ESP32 → WS63 | JSON数据发送 |
-| UART RX | **GPIO18** | TX | WS63 → ESP32 | JSON命令接收 |
+| UART TX | **GPIO47** | RX | ESP32 → WS63 | JSON数据发送 |
+| UART RX | **GPIO21** | TX | WS63 → ESP32 | JSON命令接收 |
 | RTC 唤醒 | **GPIO2** | GPIO (推挽输出) | WS63 → ESP32 | 拉高唤醒ESP32 |
 | GND | GND | GND | — | 共地 |
 
@@ -510,11 +498,11 @@ WS63 协议是 ESP32-S3 与主控设备（WS63）之间的通信协议，通过 
 
 | 命令 | 功能 | 示例 |
 |------|------|------|
-| `register` | 入库注册（初始化+等待拍摄） | `{"cmd":"register","mac":"AA:BB:CC:DD:EE:FF","item_name":"扳手","storage_area":"A","quantity":50}` |
-| `inventory` | 盘点比对（加载特征+等待拍摄） | `{"cmd":"inventory","mac":"AA:BB:CC:DD:EE:FF"}` |
-| `outbound` | 出库核验（验证资产+等待拍摄） | `{"cmd":"outbound","mac":"AA:BB:CC:DD:EE:FF","remove_qty":10}` |
+| `register` | 入库注册（初始化+等待拍摄） | `{"cmd":"register","mac":"0x0001","item_name":"扳手","storage_area":"A","quantity":50}` |
+| `inventory` | 盘点比对（加载特征+等待拍摄） | `{"cmd":"inventory","mac":"0x0001"}` |
+| `outbound` | 出库核验（验证资产+等待拍摄） | `{"cmd":"outbound","mac":"0x0001","remove_qty":10}` |
 | `capture` | 单步拍摄视图 | `{"cmd":"capture","view":"front"}` |
-| `delete` | 删除资产 | `{"cmd":"delete","mac":"AA:BB:CC:DD:EE:FF"}` |
+| `delete` | 删除资产 | `{"cmd":"delete","mac":"0x0001"}` |
 
 #### 控制命令
 
@@ -527,7 +515,7 @@ WS63 协议是 ESP32-S3 与主控设备（WS63）之间的通信协议，通过 
 | 命令 | 功能 | 示例 |
 |------|------|------|
 | `list_assets` | 查询资产列表 | `{"cmd":"list_assets"}` |
-| `get_asset` | 查询单个资产详情 | `{"cmd":"get_asset","mac":"AA:BB:CC:DD:EE:FF"}` |
+| `get_asset` | 查询单个资产详情 | `{"cmd":"get_asset","mac":"0x0001"}` |
 | `sys_info` | 查询系统信息 | `{"cmd":"sys_info"}` |
 | `ping` | 心跳检测 | `{"cmd":"ping"}` |
 
@@ -549,65 +537,65 @@ WS63 协议是 ESP32-S3 与主控设备（WS63）之间的通信协议，通过 
 
 ```
 // 1. WS63下发注册命令
-{"cmd":"register","mac":"AA:BB:CC:DD:EE:FF","item_name":"扳手","storage_area":"A","quantity":50}
+{"cmd":"register","mac":"0x0001","item_name":"扳手","storage_area":"A","quantity":50}
 
 // 2. ESP32返回初始化完成（不拍摄，只初始化硬件）
-{"type":"capture_progress","mac":"AA:BB:CC:DD:EE:FF","view":"none","step":"0/3","status":"ready"}
+{"type":"capture_progress","mac":"0x0001","view":"none","step":"0/3","status":"ready"}
 
 // 3. WS63控制拍摄正视图
 {"cmd":"capture","view":"front"}
 
 // 4. ESP32返回拍摄进度
-{"type":"capture_progress","mac":"AA:BB:CC:DD:EE:FF","view":"front","step":"1/3","status":"ok","blur_score":87.3,"feature_size":1280}
+{"type":"capture_progress","mac":"0x0001","view":"front","step":"1/3","status":"ok","blur_score":87.3,"feature_size":1280}
 
 // 5. WS63控制拍摄侧视图
 {"cmd":"capture","view":"side"}
 
 // 6. ESP32返回拍摄进度
-{"type":"capture_progress","mac":"AA:BB:CC:DD:EE:FF","view":"side","step":"2/3","status":"ok","blur_score":91.2,"feature_size":1280}
+{"type":"capture_progress","mac":"0x0001","view":"side","step":"2/3","status":"ok","blur_score":91.2,"feature_size":1280}
 
 // 7. WS63控制拍摄俯视图（最后一个视图自动触发融合+保存）
 {"cmd":"capture","view":"top"}
 
 // 8. ESP32返回拍摄进度
-{"type":"capture_progress","mac":"AA:BB:CC:DD:EE:FF","view":"top","step":"3/3","status":"ok","blur_score":84.6,"feature_size":1280}
+{"type":"capture_progress","mac":"0x0001","view":"top","step":"3/3","status":"ok","blur_score":84.6,"feature_size":1280}
 
 // 9. ESP32返回任务完成结果
-{"type":"task_done","task":"register","result":"success","mac":"AA:BB:CC:DD:EE:FF","item_name":"扳手","storage_area":"A","quantity":50,"is_overwrite":false,"file_size_kb":45}
+{"type":"task_done","task":"register","result":"success","mac":"0x0001","item_name":"扳手","storage_area":"A","quantity":50,"is_overwrite":false,"file_size_kb":45}
 ```
 
 #### 盘点比对流程
 
 ```
 // 1. WS63下发盘点命令
-{"cmd":"inventory","mac":"AA:BB:CC:DD:EE:FF"}
+{"cmd":"inventory","mac":"0x0001"}
 
 // 2. ESP32加载参考特征并初始化硬件
-{"type":"capture_progress","mac":"AA:BB:CC:DD:EE:FF","view":"none","step":"0/3","status":"ready"}
+{"type":"capture_progress","mac":"0x0001","view":"none","step":"0/3","status":"ready"}
 
 // 3-8. WS63依次发送3个capture命令（同注册流程）
 
 // 9. ESP32返回盘点结果
-{"type":"task_done","task":"inventory","result":"success","mac":"AA:BB:CC:DD:EE:FF","is_match":true,"weighted_confidence":0.892,"front_confidence":0.91,"side_confidence":0.88,"top_confidence":0.85,"threshold":0.75,"item_name":"扳手","storage_area":"A","quantity":50}
+{"type":"task_done","task":"inventory","result":"success","mac":"0x0001","is_match":true,"weighted_confidence":0.892,"front_confidence":0.91,"side_confidence":0.88,"top_confidence":0.85,"threshold":0.90,"item_name":"扳手","storage_area":"A","quantity":50}
 ```
 
 #### 出库核验流程（仅需1个视图）
 
 ```
 // 1. WS63下发出库命令
-{"cmd":"outbound","mac":"AA:BB:CC:DD:EE:FF","remove_qty":10}
+{"cmd":"outbound","mac":"0x0001","remove_qty":10}
 
 // 2. ESP32验证资产存在并初始化硬件
-{"type":"capture_progress","mac":"AA:BB:CC:DD:EE:FF","view":"none","step":"0/1","status":"ready"}
+{"type":"capture_progress","mac":"0x0001","view":"none","step":"0/1","status":"ready"}
 
 // 3. WS63控制拍摄正视图（仅需1个视图）
 {"cmd":"capture","view":"front"}
 
 // 4. ESP32返回拍摄进度
-{"type":"capture_progress","mac":"AA:BB:CC:DD:EE:FF","view":"front","step":"1/1","status":"ok","blur_score":93.5,"feature_size":1280}
+{"type":"capture_progress","mac":"0x0001","view":"front","step":"1/1","status":"ok","blur_score":93.5,"feature_size":1280}
 
 // 5. ESP32返回出库结果（自动扣减库存）
-{"type":"task_done","task":"outbound","result":"success","mac":"AA:BB:CC:DD:EE:FF","is_match":true,"confidence":0.93,"threshold":0.75,"item_name":"扳手","original_qty":50,"remove_qty":10,"remaining_qty":40,"asset_deleted":false}
+{"type":"task_done","task":"outbound","result":"success","mac":"0x0001","is_match":true,"confidence":0.93,"threshold":0.90,"item_name":"扳手","original_qty":50,"remove_qty":10,"remaining_qty":40,"asset_deleted":false}
 ```
 
 ### 错误处理
@@ -618,8 +606,8 @@ WS63 协议是 ESP32-S3 与主控设备（WS63）之间的通信协议，通过 
 {"type":"error","code":"INVALID_JSON","msg":"Invalid JSON format"}
 {"type":"error","code":"UNKNOWN_CMD","msg":"Unknown command"}
 {"type":"error","code":"MISSING_FIELD","msg":"Missing required field"}
-{"type":"error","code":"INVALID_MAC","msg":"Invalid MAC address format"}
-{"type":"error","code":"ASSET_NOT_FOUND","msg":"Asset not found for MAC: AA:BB:CC:DD:EE:FF"}
+{"type":"error","code":"INVALID_TAG_ID","msg":"Invalid MAC address format"}
+{"type":"error","code":"ASSET_NOT_FOUND","msg":"Asset not found for Tag ID: 0x0001"}
 {"type":"error","code":"NOT_INITIALIZED","msg":"Hardware not initialized, send register/inventory/outbound first"}
 {"type":"error","code":"TASK_BUSY","msg":"Previous task is still running"}
 ```
@@ -631,8 +619,8 @@ WS63 协议是 ESP32-S3 与主控设备（WS63）之间的通信协议，通过 
 | `INVALID_JSON` | JSON解析失败 | 检查JSON格式是否正确 |
 | `UNKNOWN_CMD` | 未知命令 | 确认命令名称拼写正确 |
 | `MISSING_FIELD` | 缺少必填字段 | 检查命令是否包含所有必需字段 |
-| `INVALID_MAC` | MAC地址格式错误 | 确保MAC地址为XX:XX:XX:XX:XX:XX格式 |
-| `ASSET_NOT_FOUND` | 资产不存在 | 确认MAC地址已注册 |
+| `INVALID_TAG_ID` | Tag ID格式错误 | 确保Tag ID为0x0001格式 |
+| `ASSET_NOT_FOUND` | 资产不存在 | 确认Tag ID已注册 |
 | `NOT_INITIALIZED` | 硬件未初始化 | 先发送register/inventory/outbound命令 |
 | `TASK_BUSY` | 任务忙 | 等待当前任务完成或发送cancel命令 |
 
@@ -658,7 +646,7 @@ ESP32内部维护5种工作状态：
 
 **模块文件**：
 - [protocol_handler.c](main/protocol_handler.c) / [protocol_handler.h](main/protocol_handler.h) - 协议处理器
-- UART配置：UART_NUM_1, GPIO17(TX), GPIO18(RX), 115200 baud
+- UART配置：UART_NUM_1, GPIO47(TX), GPIO21(RX), 115200 baud
 - 接收任务：独立FreeRTOS任务（优先级5），异步接收解析JSON命令
 
 **关键特性**：
@@ -674,11 +662,11 @@ ESP32内部维护5种工作状态：
 
 ### 完整协议文档
 
-详细的协议规范请参考：[docs/WS63_ESP32_PROTOCOL.md](docs/WS63_ESP32_PROTOCOL.md)
+详细的协议规范请参考：[docs/PROTOCOL/ESP32_WS63_PROTOCOL.md](docs/PROTOCOL/ESP32_WS63_PROTOCOL.md)
 
 ---
 
-## 💡 LED状态指示说明 ⭐NEW
+## 💡 LED状态指示说明 ⭐
 
 ### LED颜色含义
 
@@ -711,18 +699,18 @@ ESP32内部维护5种工作状态：
 ```
 /sdcard/
 └── assets/
-    ├── AA_BB_CC_DD_EE_FF.dat          # MAC为AA:BB:CC:DD:EE:FF的资产记录
-    ├── AA_BB_CC_DD_EE_FF_front.jpg    # 正面图片（JPEG格式）
-    ├── AA_BB_CC_DD_EE_FF_side.jpg     # 侧面图片（JPEG格式）
-    ├── AA_BB_CC_DD_EE_FF_top.jpg      # 顶部图片（JPEG格式）
+    ├── 0x0001.dat          # MAC为0x0001的资产记录
+    ├── 0x0001_front.jpg    # 正面图片（JPEG格式）
+    ├── 0x0001_side.jpg     # 侧面图片（JPEG格式）
+    ├── 0x0001_top.jpg      # 顶部图片（JPEG格式）
     ├── 11_22_33_44_55_66.dat          # MAC为11:22:33:44:55:66的资产记录
     └── ...
 ```
 
-**文件名规则**：将MAC地址中的':'替换为'_'（符合FATFS文件系统规范）
+**文件名规则**：将Tag ID中的':'替换为'_'（符合FATFS文件系统规范）
 
 每个`.dat`文件约15KB，包含：
-- MAC地址字符串（18字节）
+- Tag ID字符串（18字节）
 - 正面特征向量（1280×4=5120字节）
 - 侧面特征向量（1280×4=5120字节）
 - 顶部特征向量（1280×4=5120字节）
@@ -826,4 +814,4 @@ ESP32内部维护5种工作状态：
 ---
 
 **维护者**: TcXc  
-**最后更新**: 2026-06-09
+**最后更新**: 2026-06-18

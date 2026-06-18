@@ -1,4 +1,4 @@
-# ESP32-S3 CAM AI - 快速开始指南 v3.5
+# ESP32-S3 CAM AI - 快速开始指南 v3.6
 
 ## ⚠️ 重要提示：ESP-IDF版本要求
 
@@ -142,7 +142,7 @@ d
 
 ### 3. 输入MAC地址
 ```bash
-AA:BB:CC:DD:EE:FF
+0x0001
 ```
 
 等待系统自动完成：
@@ -158,7 +158,7 @@ AA:BB:CC:DD:EE:FF
 c
 
 # 2. 输入MAC地址
-AA:BB:CC:DD:EE:FF
+0x0001
 
 # 3. 系统引导拍摄
 [STEP 1/3] Please capture FRONT view
@@ -176,9 +176,9 @@ AA:BB:CC:DD:EE:FF
   Top:   95.12 (×0.2)
   ----------------------------------------
   Weighted Confidence: 91.8745
-  Threshold: 0.75
+  Threshold: 0.90
   ✅ MATCH - Same Asset
-  MAC: AA:BB:CC:DD:EE:FF
+  Tag ID: 0x0001
 ========================================
 ```
 
@@ -188,7 +188,7 @@ AA:BB:CC:DD:EE:FF
 r
 
 # 2. 输入MAC地址
-AA:BB:CC:DD:EE:FF
+0x0001
 
 # 3. 输入物品名称
 Wooden Chair
@@ -214,11 +214,11 @@ t  # 拍摄顶部并保存
 o
 
 # 2. 输入MAC地址
-AA:BB:CC:DD:EE:FF
+0x0001
 
 # 3. 系统显示资产信息
 ========== OUTBOUND MODE ==========
-  MAC: AA:BB:CC:DD:EE:FF
+  Tag ID: 0x0001
   Item: Wooden Chair
   Area: A
   Stock: 10
