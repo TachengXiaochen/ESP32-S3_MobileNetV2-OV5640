@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_task_wdt.h"
 
 #include "business_executor.h"
 #include "cJSON.h"
@@ -164,7 +165,14 @@ static esp_err_t be_handle_register(be_channel_t channel, const char *tag_id, co
     }
     bool has_existing = (asset_load(normalized, existing) == ESP_OK && existing->is_valid);
     if (has_existing) {
-        // TODO: 验证式更新
+        // 资产已存在，拒绝覆盖注册。需通过 UART0 或 WS63 触发验证式更新。
+        ESP_LOGW(TAG, "Register rejected: tag_id=%s already exists (item=%s, qty=%lu)",
+                 normalized, existing->item_name, (unsigned long)existing->quantity);
+        be_error_info_t err = { .error_code = -1,
+            .error_msg = "Tag ID already exists, use inventory or verify-update" };
+        g_be_cb(channel, BE_EVT_ERROR, &err);
+        free(existing);
+        return ESP_ERR_INVALID_STATE;
     }
 
     // 3. 保存任务上下文
@@ -492,7 +500,16 @@ static esp_err_t be_handle_list_assets_page(be_channel_t channel, const char *pa
     char tag_ids[MAX_ASSETS_SCAN][TAG_ID_STR_LEN];
     int total_count = 0;
 
-    DIR *dir = opendir("/sdcard/assets");
+    // 重试 opendir：DMA 内存池可能在长时间运行后碎片化，
+    // 200ms 延迟让其他任务释放短生命周期 DMA 缓冲后重试
+    DIR *dir = NULL;
+    for (int retry = 0; retry < 3; retry++) {
+        dir = opendir("/sdcard/assets");
+        if (dir) break;
+        ESP_LOGW(TAG, "opendir failed (attempt %d/3), retrying...", retry + 1);
+        esp_task_wdt_reset();
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
     if (!dir) {
         be_error_info_t err = { .error_code = -1, .error_msg = "Storage not available" };
         g_be_cb(channel, BE_EVT_ERROR, &err);
@@ -773,7 +790,11 @@ static void be_reset_state(void)
     g_be_captured_views = 0;
     g_be_is_verify_mode = false;
 
-    // main.h 全局状态（一次性全部复位，与 system_shutdown_camera() 对齐）
+    // 硬件状态：关闭摄像头 LED（对齐 system_shutdown_camera）
+    led_camera_off();
+    g_camera_power_on = false;
+
+    // main.h 全局状态（与 system_shutdown_camera() 对齐）
     g_camera_state = CAM_STATE_WAITING_TAG_ID;
     g_view_state = BE_VIEW_NONE;
     g_inventory_state = INVENTORY_IDLE;

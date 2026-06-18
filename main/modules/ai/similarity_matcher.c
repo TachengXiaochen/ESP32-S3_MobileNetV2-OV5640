@@ -112,8 +112,12 @@ float similarity_matcher_euclidean(const float *feat1, const float *feat2, int s
 
 float similarity_matcher_mixed(const float *feat1, const float *feat2, int size)
 {
-    // 高维 L2-normalized 特征下 cosine 是最可靠的相似度度量
-    // euclidean 在高维下 1/(1+d/1280) ≈ 1.0 恒成立，无区分力
+    // ⚠️ 函数名保留 "mixed" 以兼容旧接口，实际实现为纯余弦相似度。
+    // 高维 L2-normalized 特征下 cosine 是最可靠的相似度度量：
+    //   - euclidean 在高维下 1/(1+d/1280) ≈ 1.0 恒成立，无区分力
+    //   - 因此移除了 0.70*cos+0.30*euc 的混合策略
+    // 注意：verify_handler.c 中的 calculate_mixed_similarity 仍使用旧混合公式
+    //       （仅 UART0 调试路径，不影响生产），两套公式结果不同，勿混用。
     return similarity_matcher_cosine(feat1, feat2, size);
 }
 
