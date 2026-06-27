@@ -3,6 +3,8 @@
 #include "driver/uart.h"
 #include "string.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "L610_DRV";
 
@@ -256,6 +258,103 @@ esp_err_t l610_at_send_expect(const char *cmd, const char *keyword,
     }
 
     return ESP_OK;
+}
+
+esp_err_t l610_at_send_then_raw(const char *cmd, const uint8_t *data, size_t data_len,
+                                char *response_buf, size_t buf_size, uint32_t timeout_ms)
+{
+    if (!g_ready || !cmd || !data || data_len == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    uart_port_t uart_num = L610_UART_NUM;
+    uart_flush(uart_num);
+
+    size_t cmd_len = strlen(cmd);
+    char *send_buf = malloc(cmd_len + 2);
+    if (!send_buf) {
+        return ESP_ERR_NO_MEM;
+    }
+    memcpy(send_buf, cmd, cmd_len);
+    send_buf[cmd_len]     = '\r';
+    send_buf[cmd_len + 1] = '\0';
+    uart_write_bytes(uart_num, send_buf, cmd_len + 1);
+    free(send_buf);
+
+    int total_read = 0;
+    bool got_prompt = false;
+    int64_t start_us = esp_timer_get_time();
+    int64_t timeout_us = (int64_t)timeout_ms * 1000;
+
+    response_buf[0] = '\0';
+
+    while ((esp_timer_get_time() - start_us) < timeout_us) {
+        int available = 0;
+        uart_get_buffered_data_len(uart_num, (size_t *)&available);
+        if (available > 0) {
+            int to_read = available;
+            if (total_read + to_read > (int)buf_size - 1) {
+                to_read = (int)buf_size - 1 - total_read;
+            }
+            if (to_read > 0) {
+                int len = uart_read_bytes(uart_num,
+                                          (uint8_t *)&response_buf[total_read],
+                                          to_read, pdMS_TO_TICKS(10));
+                if (len > 0) {
+                    total_read += len;
+                    response_buf[total_read] = '\0';
+                    if (strchr(response_buf, '>') != NULL) {
+                        got_prompt = true;
+                        break;
+                    }
+                    if (strstr(response_buf, "ERROR") != NULL) {
+                        return ESP_FAIL;
+                    }
+                }
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    if (!got_prompt) {
+        ESP_LOGW(TAG, "AT raw: no '>' prompt for: %s", cmd);
+        return ESP_ERR_TIMEOUT;
+    }
+
+    uart_write_bytes(uart_num, (const char *)data, data_len);
+
+    total_read = 0;
+    response_buf[0] = '\0';
+    start_us = esp_timer_get_time();
+
+    while ((esp_timer_get_time() - start_us) < timeout_us) {
+        int available = 0;
+        uart_get_buffered_data_len(uart_num, (size_t *)&available);
+        if (available > 0) {
+            int to_read = available;
+            if (total_read + to_read > (int)buf_size - 1) {
+                to_read = (int)buf_size - 1 - total_read;
+            }
+            if (to_read > 0) {
+                int len = uart_read_bytes(uart_num,
+                                          (uint8_t *)&response_buf[total_read],
+                                          to_read, pdMS_TO_TICKS(10));
+                if (len > 0) {
+                    total_read += len;
+                    response_buf[total_read] = '\0';
+                    if (strstr(response_buf, "OK") != NULL ||
+                        strstr(response_buf, "ERROR") != NULL) {
+                        g_consecutive_timeouts = 0;
+                        return strstr(response_buf, "OK") != NULL ? ESP_OK : ESP_FAIL;
+                    }
+                }
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    g_consecutive_timeouts++;
+    return ESP_ERR_TIMEOUT;
 }
 
 void l610_register_urc_callback(l610_urc_cb_t callback)

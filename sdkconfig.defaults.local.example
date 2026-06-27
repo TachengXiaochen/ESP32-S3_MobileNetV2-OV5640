@@ -1,0 +1,5 @@
+# Copy to sdkconfig.defaults.local (gitignored) and fill real values.
+# Merged at build time after sdkconfig.defaults.
+
+CONFIG_L610_MQTT_USERNAME="your_mqtt_username"
+CONFIG_L610_MQTT_PASSWORD="your_mqtt_password"

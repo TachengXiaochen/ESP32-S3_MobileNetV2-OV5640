@@ -95,13 +95,19 @@ if(usize>0)
     udelete 1
   }else if(usize>=3)
   {
-    for(sys0=1;sys0<usize;sys0++)
+    sys1=1
+    sys2=usize
+    while(sys1<sys2)
     {
-      if(u[sys0]==0x0d&&u[sys0+1]==0x0a)
+      if(u[sys1]==0x0d)
       {
-        udelete sys0+2
-        sys0=usize+1
+        if(u[sys1+1]==0x0a)
+        {
+          udelete sys1+2
+          sys1=sys2
+        }
       }
+      sys1=sys1+1
     }
   }
 }
@@ -460,6 +466,8 @@ if(sys0!=4)
 // ===== b3: 返回menu =====
 prints "@in,cancel",0
 printh 0d 0a
+sys0=0
+getFrameFlag=0
 page 0
 ```
 
@@ -636,6 +644,8 @@ if(sys0!=4)
 // ===== b3: 返回menu =====
 prints "@out,cancel",0
 printh 0d 0a
+sys0=0
+getFrameFlag=0
 page 0
 ```
 
@@ -824,6 +834,8 @@ if(sys0!=3)
 // ===== b3: 返回menu =====
 prints "@check,cancel",0
 printh 0d 0a
+sys0=0
+getFrameFlag=0
 page 0
 ```
 
@@ -1209,6 +1221,8 @@ t41.txt="已停止定位"
 // ===== b3: 返回menu =====
 prints "@find,cancel",0
 printh 0d 0a
+sys0=0
+getFrameFlag=0
 page 0
 ```
 
@@ -1383,6 +1397,8 @@ t51.txt="正在断开..."
 // ===== b3: 返回menu =====
 prints "@setting,cancel",0
 printh 0d 0a
+sys0=0
+getFrameFlag=0
 page 0
 ```
 

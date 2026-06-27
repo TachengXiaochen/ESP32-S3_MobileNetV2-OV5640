@@ -472,22 +472,17 @@ bool l610_mqtt_publish(const char *topic, const char *payload); // 发布消息
 void l610_manager_heartbeat(void);                        // 心跳保活
 ```
 
-**ThingsKit配置**：
-- 服务器：`mqtt.thingskit.com`
-- 端口：1883 (TCP) / 8883 (TLS)
-- QoS等级：1 (至少一次送达)
-- ClientID格式：`ESP32-{MAC地址}`
+**EMQX Cloud 配置（物联网大赛）**：
+- 服务器：`h13f6185.ala.cn-hangzhou.emqxsl.cn`（Kconfig 可改）
+- 端口：**8883** MQTTS（`AT+MQTTOPEN` UseTls=**2**）
+- 上云主题：`v1/gateway/telemetry`（WS63 透传，方案 A）
+- 凭据：menuconfig 或 `sdkconfig.defaults.local`（勿提交 Git）
 
-**主动上报机制**：
-- MQTT意外断开 → `l610_error`
-- 模块失联 → `L610_NOT_RESPONDING`
-- 网络异常 → `NETWORK_DETACHED`
-
-**硬件连接**：
+**硬件连接**（ADP-L610 J3）：
 ```
 ESP32-S3                L610 Module
-├── GPIO4 (TX) ──────► RX
-├── GPIO5 (RX) ◄────── TX
+├── GPIO19 (TX) ──────► RX
+├── GPIO20 (RX) ◄────── TX
 └── GND ────────────── GND
 ```
 
@@ -954,6 +949,92 @@ ESP_LOGI(TAG, "Inference time: %lld ms", elapsed);
 
 ---
 
+## 🤖 Cursor / Agent 开发环境
+
+> **日期**: 2026-06-26  
+> **说明**: Cursor 与 Claude Code **均自动读取** 本文件 `CLAUDE.md` 作为项目规范，**无需** 单独维护 `Cursor.md`。  
+> Cursor 额外支持 `.cursor/rules/*.mdc`（本项目见 `.cursor/rules/esp-idf-toolchain.mdc`）。
+
+### IDE 与扩展
+
+| 项 | 配置 |
+|----|------|
+| 主力 IDE | **Cursor**（ESP-IDF 扩展 v2.1.0） |
+| IDF 版本 | **v5.3.5**（`D:/Espressif/frameworks/esp-idf-v5.3.5/`） |
+| Python 环境 | `D:\Espressif\python_env\idf5.3_py3.11_env`（**勿用** py3.12） |
+| 目标芯片 | `esp32s3` |
+| 默认串口 | `COM7`（以 `idf.portWin` / `tools/esp32s3_env.bat` 为准；Agent 先用 `ports` 探测） |
+| 已移除扩展 | Cline、通义灵码（避免与 Cursor Agent 冲突） |
+
+### 项目工具链 (`tools/`)
+
+Agent **必须优先** 使用 `tools/idf.ps1`，不要依赖未激活的 `export.bat` 或裸 `idf.py`。
+
+| 文件 | 作用 |
+|------|------|
+| `tools/esp32s3_env.bat` | 激活 IDF 环境（`IDF_PATH`、`IDF_PYTHON_ENV_PATH`、`IDF_TARGET=esp32s3`） |
+| `tools/idf.ps1` | 统一入口：build / flash / monitor-capture / monitor-log / ports |
+| `tools/idf.bat` | 批处理快捷方式 |
+| `tools/capture_serial.py` | 非交互式串口抓取 |
+
+**Agent 常用命令**（在项目根目录执行）：
+
+```powershell
+.\tools\idf.ps1 build                          # 编译
+.\tools\idf.ps1 flash -Port COM7                 # 烧录
+.\tools\idf.ps1 size                             # 固件大小
+.\tools\idf.ps1 ports                            # 列出可用 COM 口
+.\tools\idf.ps1 monitor-capture -Port COM7 -Seconds 10   # 抓取串口日志
+.\tools\idf.ps1 monitor-log                      # 读取最近一次抓取
+```
+
+**人工交互**（集成终端，需真实 TTY）：
+
+```powershell
+.\tools\idf.bat build
+idf.py -p COM7 monitor    # 退出: Ctrl+]
+```
+
+### 串口日志（Agent 读取方式）
+
+| 方式 | Agent 是否可用 | 说明 |
+|------|----------------|------|
+| `idf.py monitor` | ❌ | 需要交互式 TTY，Agent 终端会失败 |
+| `monitor-capture` → `logs/monitor_capture.log` | ✅ | **推荐**：先关闭 IDE 占用的串口，再抓取 |
+| 读取 Cursor 终端快照 | ⚠️ | 仅当用户已打开 monitor 且终端有输出时 |
+
+抓取前若报 `信号灯超时`，说明 COM 口被 ESP-IDF Monitor 占用，需用户先关闭 monitor。
+
+### MCP 与 Skills
+
+| 位置 | 内容 |
+|------|------|
+| `~/.cursor/mcp.json` | 全局 MCP：context7、memory、sequential-thinking、github、pdf-reader、fetch、shadcn |
+| `.cursor/mcp.json` | 项目 MCP：shadcn |
+| `~/.cursor/skills/` | 用户 Skill：`web-design-engineer` |
+| 项目根 `CLAUDE.md` | 本文件（架构铁律 + 业务规范） |
+
+已禁用/删除的 MCP：`time`（npm 404）、`react-bits`（连接失败）。
+
+### 索引排除 (`.cursorignore`)
+
+以下内容不进入 Cursor 代码索引（仍参与编译）：
+
+```
+build/  managed_components/  *.bin  *.elf  *.map  sdkconfig  *.espdl
+```
+
+串口抓取日志 `logs/monitor_capture.log` **不在** ignore 列表，Agent 可直接读取。
+
+### Agent 操作铁律
+
+1. **编译/烧录**：走 `.\tools\idf.ps1`，不要改 sdkconfig 除非用户明确要求  
+2. **读日志**：`monitor-capture` 后读 `logs/monitor_capture.log`  
+3. **跨模块**：遵守本文「架构铁律」，业务走 `business_executor`  
+4. **提交**：用户未要求时不 `git commit`；修复后写 `docs/archive/YYYYMMDD_*.md` 报告  
+
+---
+
 ## 📚 相关文档
 
 ### 核心文档
@@ -972,6 +1053,7 @@ ESP_LOGI(TAG, "Inference time: %lld ms", elapsed);
 - 📝 [docs/archive/20260609_WEB_LIVE_PREVIEW.md](docs/archive/20260609_WEB_LIVE_PREVIEW.md) - Web实时预览实施报告
 - 📝 [docs/archive/20260617_MAIN_C_REFACTOR.md](docs/archive/20260617_MAIN_C_REFACTOR.md) - main.c去上帝化重构报告
 - 📝 [docs/archive/20260618_DMA_MEMORY_EXHAUSTION_FIX.md](docs/archive/20260618_DMA_MEMORY_EXHAUSTION_FIX.md) - v3.6 稳定性修复报告
+- 📝 [docs/archive/20260623_DMA_FRAGMENTATION_FIX.md](docs/archive/20260623_DMA_FRAGMENTATION_FIX.md) - DMA 碎片化根因修复（sdkconfig + 水位检查）
 
 ### WS63端文档
 - 📖 [ws63/README.md](ws63/README.md) - WS63网关项目说明

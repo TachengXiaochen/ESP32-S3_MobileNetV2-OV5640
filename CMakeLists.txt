@@ -10,6 +10,11 @@ set(EXTRA_COMPONENT_DIRS
     "${CMAKE_CURRENT_SOURCE_DIR}/components/esp-dl/models/imagenet_cls"
 )
 
+set(SDKCONFIG_DEFAULTS "${CMAKE_CURRENT_SOURCE_DIR}/sdkconfig.defaults")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/sdkconfig.defaults.local")
+    list(APPEND SDKCONFIG_DEFAULTS "${CMAKE_CURRENT_SOURCE_DIR}/sdkconfig.defaults.local")
+endif()
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 # 配置分区表文件

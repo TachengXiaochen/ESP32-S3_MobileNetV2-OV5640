@@ -51,8 +51,13 @@ esp_err_t l610_manager_get_status(l610_status_t *status);
 int l610_manager_get_signal_quality(void);
 
 /**
+ * @brief 连接到 MQTT Broker（本地调试；生产由 WS63 mqtt_connect 发起）
+ */
+esp_err_t l610_manager_connect_mqtt(void);
+
+/**
  * @brief 尝试重新连接MQTT (用于重连逻辑)
- * 
+ *
  * @return esp_err_t 连接结果
  */
 esp_err_t l610_manager_reconnect_mqtt(void);

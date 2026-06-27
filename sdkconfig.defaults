@@ -1,0 +1,8 @@
+# CAM AI — committed defaults (no secrets)
+# Credentials: copy sdkconfig.defaults.local.example → sdkconfig.defaults.local
+
+CONFIG_CAM_AI_ENABLE_WEB_SERVER=n
+
+CONFIG_L610_MQTT_BROKER_HOST="h13f6185.ala.cn-hangzhou.emqxsl.cn"
+CONFIG_L610_MQTT_BROKER_PORT=8883
+CONFIG_L610_MQTT_CLIENT_ID_STR="esp32_s3cam"

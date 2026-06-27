@@ -5,6 +5,7 @@
 #include "stdio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 
 static const char *TAG = "L610_MQTT";
 
@@ -23,6 +24,38 @@ static bool g_mqtt_pub_result  = false;
 static bool g_mqtt_close_result = false;
 
 // ========== 内部函数 ==========
+
+static esp_err_t l610_wait_network_attached(void)
+{
+    char resp[128];
+
+    for (int i = 0; i < 30; i++) {
+        esp_err_t ret = l610_at_send("AT+CGATT?", resp, sizeof(resp),
+                                     L610_AT_CGATT_TIMEOUT);
+        if (ret == ESP_OK && strstr(resp, "+CGATT: 1") != NULL) {
+            ESP_LOGI(TAG, "GPRS attached (CGATT=1)");
+            return ESP_OK;
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
+    ESP_LOGW(TAG, "CGATT attach timeout");
+    return ESP_ERR_TIMEOUT;
+}
+
+static bool payload_needs_raw_mode(const char *topic, const char *payload, size_t len)
+{
+    if (len > L610_MQTT_STRING_SAFE_MAX) {
+        return true;
+    }
+    for (size_t i = 0; i < len; i++) {
+        if (payload[i] == '"' || payload[i] == '\\') {
+            return true;
+        }
+    }
+    size_t est = strlen("AT+MQTTPUB=1,\"") + strlen(topic) + 16 + len + 4;
+    return est >= L610_UART_BUF_SIZE - 1;
+}
 
 /**
  * @brief URC回调: 解析MQTT相关URC并更新状态/信号量
@@ -93,13 +126,13 @@ esp_err_t l610_mqtt_set_user(const char *client_id_str,
     
     // ✅ 优先使用传入的client_id_str，否则使用空字符串（L610会用IMEI）
     if (!client_id_str || strlen(client_id_str) == 0) {
-        client_id_str = "";  // 降级为IMEI
+        client_id_str = L610_MQTT_CLIENT_ID_STR;
     }
 
     char cmd[256];
     int n = snprintf(cmd, sizeof(cmd),
-                     "AT+MQTTUSER=%d,\"%s\",\"%s\",\"%s\"",
-                     L610_MQTT_CLIENT_ID, username, password, client_id_str);
+                     "AT+MQTTUSER=%s,\"%s\",\"%s\",\"%s\"",
+                     L610_MQTT_CONN_ID, username, password, client_id_str);
     if (n >= (int)sizeof(cmd)) {
         ESP_LOGE(TAG, "cmd buffer too small for MQTTUSER");
         return ESP_ERR_INVALID_SIZE;
@@ -133,6 +166,12 @@ esp_err_t l610_mqtt_connect(const char *host, uint16_t port,
     strncpy(g_current_host, host, sizeof(g_current_host) - 1);
     g_current_port = port;
 
+    esp_err_t ret = l610_wait_network_attached();
+    if (ret != ESP_OK) {
+        g_mqtt_state = MQTT_STATE_ERROR;
+        return ret;
+    }
+
     // 创建信号量 (如果尚未创建)
     if (!g_mqtt_open_sem) {
         g_mqtt_open_sem = xSemaphoreCreateBinary();
@@ -143,8 +182,8 @@ esp_err_t l610_mqtt_connect(const char *host, uint16_t port,
 
     char cmd[256];
     int n = snprintf(cmd, sizeof(cmd),
-                     "AT+MQTTOPEN=%d,\"%s\",%d,%d,%d,%d",
-                     L610_MQTT_CLIENT_ID, host, port,
+                     "AT+MQTTOPEN=%s,\"%s\",%d,%d,%d,%d",
+                     L610_MQTT_CONN_ID, host, port,
                      clean_session, keepalive, L610_MQTT_USE_TLS);
     if (n >= (int)sizeof(cmd)) {
         ESP_LOGE(TAG, "cmd buffer too small for MQTTOPEN");
@@ -152,8 +191,8 @@ esp_err_t l610_mqtt_connect(const char *host, uint16_t port,
     }
 
     char resp[256];
-    esp_err_t ret = l610_at_send(cmd, resp, sizeof(resp),
-                                 L610_AT_MQTT_OPEN_TIMEOUT);
+    ret = l610_at_send(cmd, resp, sizeof(resp),
+                       L610_AT_MQTT_OPEN_TIMEOUT);
     if (ret != ESP_OK) {
         g_mqtt_state = MQTT_STATE_ERROR;
         return ret;
@@ -178,19 +217,10 @@ esp_err_t l610_mqtt_publish(const char *topic, const char *payload,
 {
     if (!topic || !payload) return ESP_ERR_INVALID_ARG;
 
-    // ✅ 新增：Payload长度检查（L610限制最大1024字节）
     size_t payload_len = strlen(payload);
-    if (payload_len > 1024) {
-        ESP_LOGE(TAG, "Payload too long: %zu bytes (max 1024)", payload_len);
-        return ESP_ERR_INVALID_SIZE;
-    }
-
-    // 检查完整AT指令长度（预留空间给AT前缀和参数）
-    size_t estimated_cmd_len = strlen("AT+MQTTPUB=1,\"") + strlen(topic) + 
-                               strlen("\",1,0,\"") + payload_len + strlen("\"");
-    if (estimated_cmd_len >= L610_UART_BUF_SIZE - 1) {
-        ESP_LOGE(TAG, "AT command too long: %zu bytes (max %d)", 
-                 estimated_cmd_len, L610_UART_BUF_SIZE - 1);
+    if (payload_len == 0 || payload_len > L610_MQTT_MAX_PAYLOAD) {
+        ESP_LOGE(TAG, "Payload length invalid: %zu (max %d)", payload_len,
+                 L610_MQTT_MAX_PAYLOAD);
         return ESP_ERR_INVALID_SIZE;
     }
 
@@ -206,32 +236,45 @@ esp_err_t l610_mqtt_publish(const char *topic, const char *payload,
 
     g_mqtt_pub_result = false;
 
-    // 构建AT+MQTTPUB命令
-    // 注意payload中双引号需要转义: " → \"
-    char cmd[L610_UART_BUF_SIZE];
-    int n = snprintf(cmd, sizeof(cmd),
-                     "AT+MQTTPUB=%d,\"%s\",%d,%d,\"%s\"",
-                     L610_MQTT_CLIENT_ID, topic, qos, retain, payload);
-    if (n >= (int)sizeof(cmd)) {
-        ESP_LOGE(TAG, "cmd buffer too small for MQTTPUB (len=%d)", n);
-        return ESP_ERR_INVALID_SIZE;
+    char resp[L610_UART_BUF_SIZE];
+    esp_err_t ret;
+    bool raw_mode = payload_needs_raw_mode(topic, payload, payload_len);
+
+    if (raw_mode) {
+        char cmd[256];
+        int n = snprintf(cmd, sizeof(cmd),
+                         "AT+MQTTPUB=%s,\"%s\",%d,%d,%zu",
+                         L610_MQTT_CONN_ID, topic, qos, retain, payload_len);
+        if (n >= (int)sizeof(cmd)) {
+            ESP_LOGE(TAG, "cmd buffer too small for MQTTPUB raw");
+            return ESP_ERR_INVALID_SIZE;
+        }
+        ESP_LOGD(TAG, "MQTTPUB raw mode, %zu bytes", payload_len);
+        ret = l610_at_send_then_raw(cmd, (const uint8_t *)payload, payload_len,
+                                    resp, sizeof(resp), L610_AT_MQTT_PUB_TIMEOUT);
+    } else {
+        char cmd[L610_UART_BUF_SIZE];
+        int n = snprintf(cmd, sizeof(cmd),
+                         "AT+MQTTPUB=%s,\"%s\",%d,%d,\"%s\"",
+                         L610_MQTT_CONN_ID, topic, qos, retain, payload);
+        if (n >= (int)sizeof(cmd)) {
+            ESP_LOGE(TAG, "cmd buffer too small for MQTTPUB (len=%d)", n);
+            return ESP_ERR_INVALID_SIZE;
+        }
+        ret = l610_at_send(cmd, resp, sizeof(resp), L610_AT_MQTT_PUB_TIMEOUT);
     }
 
-    char resp[L610_UART_BUF_SIZE];
-    esp_err_t ret = l610_at_send(cmd, resp, sizeof(resp),
-                                 L610_AT_MQTT_PUB_TIMEOUT);
     if (ret != ESP_OK) {
         return ret;
     }
 
-    // 等待 +MQTTPUB URC
     if (xSemaphoreTake(g_mqtt_pub_sem, pdMS_TO_TICKS(timeout_sec * 1000))
         == pdTRUE) {
         return g_mqtt_pub_result ? ESP_OK : ESP_FAIL;
-    } else {
-        ESP_LOGW(TAG, "MQTT publish URC timeout after %d sec", timeout_sec);
-        return ESP_ERR_TIMEOUT;
     }
+
+    ESP_LOGW(TAG, "MQTT publish URC timeout after %d sec", timeout_sec);
+    return ESP_ERR_TIMEOUT;
 }
 
 esp_err_t l610_mqtt_disconnect(int timeout_sec)
@@ -248,7 +291,7 @@ esp_err_t l610_mqtt_disconnect(int timeout_sec)
     g_mqtt_close_result = false;
 
     char cmd[64];
-    snprintf(cmd, sizeof(cmd), "AT+MQTTCLOSE=%d", L610_MQTT_CLIENT_ID);
+    snprintf(cmd, sizeof(cmd), "AT+MQTTCLOSE=%s", L610_MQTT_CONN_ID);
 
     char resp[128];
     esp_err_t ret = l610_at_send(cmd, resp, sizeof(resp),
@@ -301,4 +344,14 @@ void l610_mqtt_cleanup(void)
     g_current_port = 0;
     
     ESP_LOGI(TAG, "L610 MQTT resources cleaned up");
+}
+
+const char *l610_mqtt_get_connected_host(void)
+{
+    return g_current_host[0] ? g_current_host : NULL;
+}
+
+uint16_t l610_mqtt_get_connected_port(void)
+{
+    return g_current_port;
 }

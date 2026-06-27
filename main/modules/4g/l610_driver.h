@@ -53,6 +53,14 @@ esp_err_t l610_at_send_expect(const char *cmd, const char *keyword,
                               uint32_t timeout_ms);
 
 /**
+ * @brief 发送 AT 指令，等待 '>' 提示符后写入二进制 payload，再等待 OK/ERROR
+ *
+ * 用于 L610 AT+MQTTPUB 的 Datasize/HEX 模式（Fibocom MQTT AT V1.0.2）。
+ */
+esp_err_t l610_at_send_then_raw(const char *cmd, const uint8_t *data, size_t data_len,
+                                char *response_buf, size_t buf_size, uint32_t timeout_ms);
+
+/**
  * @brief 注册URC异步回调
  * 
  * URC解析器会在后台任务中识别 `+MQTTOPEN:` `+MQTTPUB:` 

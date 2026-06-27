@@ -213,6 +213,7 @@ void camera_ai_task(void *pvParameters)
     printf("[DIAG] AI TASK STARTED\n");
     esp_task_wdt_add(NULL);
     system_msg_t msg;
+
     while (1) {
         if (xQueueReceive(xSystemQueue, &msg, pdMS_TO_TICKS(2000))) {
             SAFE_WDT_RESET();

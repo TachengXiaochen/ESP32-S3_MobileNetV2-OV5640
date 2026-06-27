@@ -294,11 +294,50 @@ int l610_manager_get_signal_quality(void)
     return parse_csq(resp);
 }
 
+/**
+ * @brief 连接到 MQTT Broker（本地调试 / CLI 用，生产由 WS63 mqtt_connect 发起）
+ *
+ * 使用 Kconfig 默认 Broker；物联网大赛主路径为 WS63 → uart_handler mqtt_connect。
+ */
+esp_err_t l610_manager_connect_mqtt(void)
+{
+    if (g_cached_status.module_state != L610_STATE_READY) {
+        ESP_LOGW(TAG, "L610 not ready, cannot connect MQTT");
+        return ESP_FAIL;
+    }
+
+    esp_err_t ret = l610_mqtt_set_user(NULL, NULL, NULL);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "MQTT set_user failed (code=0x%x)", ret);
+    }
+
+    ESP_LOGI(TAG, "Connecting to MQTT: %s:%d",
+             L610_MQTT_BROKER_HOST, L610_MQTT_BROKER_PORT);
+    ret = l610_mqtt_connect(L610_MQTT_BROKER_HOST, L610_MQTT_BROKER_PORT,
+                            L610_MQTT_CLEAN_SESSION, L610_MQTT_KEEPALIVE, 15);
+    if (ret == ESP_OK) {
+        g_reconnect_attempts = 0;
+        ESP_LOGI(TAG, "MQTT connected (EMQX Cloud MQTTS)");
+    } else {
+        g_reconnect_attempts = 1;
+        ESP_LOGW(TAG, "MQTT initial connect failed (will retry)");
+    }
+
+    return ret;
+}
+
 esp_err_t l610_manager_reconnect_mqtt(void)
 {
-    // 使用硬编码的ThingsKit凭据重连
-    return l610_mqtt_connect("demo.thingskit.com", 1883,
-                             1, 60, 15);
+    const char *host = l610_mqtt_get_connected_host();
+    uint16_t port = l610_mqtt_get_connected_port();
+
+    if (!host || host[0] == '\0') {
+        host = L610_MQTT_BROKER_HOST;
+        port = L610_MQTT_BROKER_PORT;
+    }
+
+    return l610_mqtt_connect(host, port,
+                             L610_MQTT_CLEAN_SESSION, L610_MQTT_KEEPALIVE, 15);
 }
 
 void l610_manager_register_send_func(void (*send_func)(const char *))

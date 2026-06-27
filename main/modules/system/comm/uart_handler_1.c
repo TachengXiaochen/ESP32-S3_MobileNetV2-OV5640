@@ -326,6 +326,8 @@ static void uart1_process_line(const char *json_str)
     }
 
     // L610 4G 命令（不经过 business_executor）
+    //   WS63 主控通过此路径发送 AT 指令透传到 L610
+    //   标签数据上云: {"cmd":"mqtt_publish","topic":"v1/gateway/telemetry","payload":"<json>"}
     if (strcmp(cmd_str, "mqtt_connect") == 0) {
         uart1_handle_l610_connect(json_obj);
     } else if (strcmp(cmd_str, "mqtt_disconnect") == 0) {

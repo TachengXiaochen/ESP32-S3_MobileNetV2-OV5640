@@ -360,6 +360,15 @@ esp_err_t asset_save(const asset_record_t *record, bool *is_overwrite)
         }
     }
 
+    // 【DMA 检查】确认 DMA 内存池有足够空间，不足时等待其他任务释放
+    for (int dma_wait = 0; dma_wait < 10; dma_wait++) {
+        size_t dma_free = heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
+        if (dma_free >= 65536) break;  // 64KB+ 即可安全写入
+        ESP_LOGW(TAG, "DMA pool low (%u bytes free), waiting... (%d/10)",
+                 (unsigned)dma_free, dma_wait + 1);
+        vTaskDelay(pdMS_TO_TICKS(300));
+    }
+
     // 【DMA 修复】fopen/fwrite 触发 SDMMC DMA 分配，内部 DRAM 碎片化时可能失败
     #define ASSET_SAVE_RETRY  3
     for (int retry = 0; retry < ASSET_SAVE_RETRY; retry++) {

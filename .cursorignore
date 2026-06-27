@@ -1,0 +1,20 @@
+﻿# Build outputs
+build/
+managed_components/
+dependencies/
+
+# ESP-IDF generated / binary artifacts
+*.bin
+*.elf
+*.map
+sdkconfig
+sdkconfig.old
+
+# Large model / asset blobs
+*.espdl
+*.tflite
+
+# IDE / tool caches
+.cache/
+.clangd/
+.vscode/.cache/

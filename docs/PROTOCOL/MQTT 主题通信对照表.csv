@@ -1,0 +1,12 @@
+﻿设备,功能,发布主题,订阅主题,平台角色,设备角色
+网关 / 直连设备,网关 / 直连设备遥测,v1/devices/me/telemetry,v1/devices/me/telemetry,订阅,发布
+网关 / 直连设备,服务端命令下发到设备端,v1/devices/me/rpc/request/$request_id,v1/devices/me/rpc/request/+,发布,订阅
+网关 / 直连设备,设备端响应命令到服务端,v1/devices/me/rpc/response/$request_id,v1/devices/me/rpc/response/+,订阅,发布
+网关 / 直连设备,直连设备属性上报,v1/devices/me/attributes,v1/devices/me/attributes,订阅,发布
+网关 / 直连设备,设备端请求服务端共享属性及客户端属性,v1/devices/me/attributes/request/$request_id,v1/devices/me/attributes/response/+,订阅,发布
+网关 / 直连设备,服务端响应共享属性及客户端属性给设备端,v1/devices/me/attributes/response/$request_id,v1/devices/me/attributes/response/+,发布,订阅
+网关子设备,设备端请求服务端子设备共享属性及客户端属性,v1/gateway/attributes/request,v1/gateway/attributes/request,订阅,发布
+网关子设备,服务端响应共享属性及客户端属性给设备端,v1/gateway/attributes/response,v1/gateway/attributes/response,发布,订阅
+网关子设备,设备端上报子设备客户端属性,v1/gateway/attributes,v1/gateway/attributes,订阅,发布
+网关子设备,网关子设备遥测,v1/gateway/telemetry,v1/gateway/telemetry,订阅,发布
+网关 / 直连 / 网关子设备,事件上报,v1/devices/event/deviceId/{identifier} 或 v1/devices/event/deviceName/{identifier},v1/devices/event/deviceId/{identifier} 或 v1/devices/event/deviceName/{identifier},订阅,发布

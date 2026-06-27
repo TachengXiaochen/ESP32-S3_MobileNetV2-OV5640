@@ -1,6 +1,7 @@
 #ifndef L610_CONFIG_H
 #define L610_CONFIG_H
 
+#include "sdkconfig.h"
 #include "driver/gpio.h"
 #include "stdint.h"
 
@@ -34,15 +35,30 @@ extern "C" {
 #define L610_MQTT_RECONNECT_DELAY_MS 5000        // 重连间隔(ms)
 #define L610_LOST_THRESHOLD        3             // 连续超时次数 → 标记L610_OFF
 
-// ========== MQTT 凭据 (硬编码, 见ThingsKit配置) ==========
-#define L610_MQTT_CLIENT_ID        1
-#define L610_MQTT_USERNAME         "<MQTT_USERNAME>"
-#define L610_MQTT_PASSWORD         ""
+// ========== MQTT Broker 配置（EMQX Cloud MQTTS） ==========
+// 凭据通过 menuconfig 或 sdkconfig.defaults.local → sdkconfig（已 gitignore）
+#define L610_MQTT_BROKER_HOST      CONFIG_L610_MQTT_BROKER_HOST
+#define L610_MQTT_BROKER_PORT      CONFIG_L610_MQTT_BROKER_PORT
+#define L610_MQTT_CONN_ID          "1"            // AT 连接槽位 1 或 2（Fibocom 手册）
+#define L610_MQTT_CLIENT_ID_STR    CONFIG_L610_MQTT_CLIENT_ID_STR
+#define L610_MQTT_USERNAME         CONFIG_L610_MQTT_USERNAME
+#define L610_MQTT_PASSWORD         CONFIG_L610_MQTT_PASSWORD
 #define L610_MQTT_KEEPALIVE        60
 #define L610_MQTT_CLEAN_SESSION    1
-#define L610_MQTT_USE_TLS          0
+#define L610_MQTT_USE_TLS          2              // MQTTOPEN UseTls: 0=tcp, 1=reserve, 2=tls
 #define L610_MQTT_QOS              1
 #define L610_MQTT_RETAIN           0
+#define L610_MQTT_MAX_PAYLOAD      1024         // MQTTPUB 最大 payload（字节）
+#define L610_MQTT_STRING_SAFE_MAX  200          // 超过或含引号时走 Datasize 二进制模式
+
+// ========== MQTT 主题（ThingsKit 网关模式，方案 A 单主题） ==========
+// 标签 + ESP32 sys_info 均由 WS63 合并为同一 JSON 后 mqtt_publish 到此主题
+#define L610_TOPIC_GATEWAY_TELEMETRY  "v1/gateway/telemetry"
+
+// ========== 赛道选择 ==========
+#define CLOUD_MODE_WS63_WIFI       0   // 嵌入式大赛: WS63 WiFi 直连云
+#define CLOUD_MODE_ESP32_L610      1   // 物联网大赛: ESP32 L610 4G 上云
+#define CLOUD_MODE                  CLOUD_MODE_ESP32_L610       // ← 当前赛道
 
 // ========== 状态枚举 ==========
 typedef enum {

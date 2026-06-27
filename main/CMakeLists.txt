@@ -1,29 +1,43 @@
-idf_component_register(SRCS "app_handlers.c" "modules/system/executor/business_executor.c"
-                             "modules/system/comm/uart_handler_0.c"
-                             "modules/system/comm/uart_handler_1.c"
-                             "main.c"
-                             "modules/ai/inference_task.c"
-                             "modules/system/storage/storage_task.c"
-                             "modules/system/storage/asset_manager.c"
-                             "modules/system/verify/tag_id_validator.c"
-                             "modules/system/verify/verify_handler.c"
-                             "modules/camera/camera_module.c"
-                             "modules/system/storage/storage_module.c"
-                             "modules/ai/ai_module.c"
-                             "modules/ai/mobilenet_wrapper.cpp"
-                             "modules/system/led/led_indicator.c"
-                             "modules/ai/feature_processor.c"
-                             "modules/ai/similarity_matcher.c"
-                             "modules/ai/blur_detection.c"
-                             "modules/4g/l610_driver.c"
-                             "modules/4g/l610_mqtt.c"
-                             "modules/4g/l610_manager.c"
-                             "modules/web/web_server.c"
-                             "modules/web/mjpeg_handler.c"
-                             "modules/web/api_handlers.c"
-                    INCLUDE_DIRS "." "modules/ai" "modules/camera" "modules/system" "modules/4g"
-                                   "modules/system/storage" "modules/system/executor"
-                                   "modules/system/comm" "modules/system/verify" "modules/system/led"
-                                   "modules/web"
-                    REQUIRES esp32-camera esp-dl imagenet_cls fatfs sdmmc nvs_flash driver json
-                             esp_wifi esp_http_server esp_netif lwip spiffs)
+set(SRCS
+    "app_handlers.c"
+    "modules/system/executor/business_executor.c"
+    "modules/system/comm/uart_handler_0.c"
+    "modules/system/comm/uart_handler_1.c"
+    "main.c"
+    "modules/ai/inference_task.c"
+    "modules/system/storage/storage_task.c"
+    "modules/system/storage/asset_manager.c"
+    "modules/system/verify/tag_id_validator.c"
+    "modules/system/verify/verify_handler.c"
+    "modules/camera/camera_module.c"
+    "modules/system/storage/storage_module.c"
+    "modules/ai/ai_module.c"
+    "modules/ai/mobilenet_wrapper.cpp"
+    "modules/system/led/led_indicator.c"
+    "modules/ai/feature_processor.c"
+    "modules/ai/similarity_matcher.c"
+    "modules/ai/blur_detection.c"
+    "modules/4g/l610_driver.c"
+    "modules/4g/l610_mqtt.c"
+    "modules/4g/l610_manager.c"
+)
+
+set(INC_DIRS "." "modules/ai" "modules/camera" "modules/system" "modules/4g"
+             "modules/system/storage" "modules/system/executor"
+             "modules/system/comm" "modules/system/verify" "modules/system/led")
+
+set(COMPONENT_REQUIRES esp32-camera esp-dl imagenet_cls fatfs sdmmc nvs_flash driver json)
+
+if(CONFIG_CAM_AI_ENABLE_WEB_SERVER)
+    list(APPEND SRCS
+        "modules/web/web_server.c"
+        "modules/web/mjpeg_handler.c"
+        "modules/web/api_handlers.c"
+    )
+    list(APPEND INC_DIRS "modules/web")
+    list(APPEND COMPONENT_REQUIRES esp_wifi esp_http_server esp_netif lwip spiffs)
+endif()
+
+idf_component_register(SRCS ${SRCS}
+                    INCLUDE_DIRS ${INC_DIRS}
+                    REQUIRES ${COMPONENT_REQUIRES})

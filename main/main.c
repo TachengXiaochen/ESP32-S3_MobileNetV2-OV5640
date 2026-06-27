@@ -25,6 +25,7 @@
 #include "freertos/semphr.h"
 
 #include "main.h"
+#include "sdkconfig.h"
 #include "app_handlers.h"
 #include "modules/ai/inference_task.h"
 #include "modules/system/storage/storage_task.h"
@@ -35,7 +36,9 @@
 #include "modules/system/verify/verify_handler.h"
 #include "modules/system/comm/uart_handler_0.h"
 #include "modules/system/comm/uart_handler_1.h"
+#if CONFIG_CAM_AI_ENABLE_WEB_SERVER
 #include "modules/web/web_server.h"
+#endif
 #include "modules/4g/l610_manager.h"
 
 static const char *TAG = "camera_ai";
@@ -115,12 +118,15 @@ void app_main(void)
     uart_handler_0_init();
     uart_handler_1_init();
 
+#if CONFIG_CAM_AI_ENABLE_WEB_SERVER
     // 延迟3秒确保SD卡DMA、PSRAM完全释放后再启动WiFi
     vTaskDelay(pdMS_TO_TICKS(3000));
     ESP_LOGI(TAG, "Starting web server (delayed init)...");
     web_server_init();
+#else
+    ESP_LOGI(TAG, "Web server disabled (menuconfig: CAM_AI_ENABLE_WEB_SERVER=n)");
+#endif
 
-    // WiFi 就绪后再初始化 L610（避免L610 AT超时阻塞Web预览）
     ret = l610_manager_init();
     if (ret == ESP_OK) {
         ret = l610_manager_start();
