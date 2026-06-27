@@ -583,14 +583,14 @@ FINALIZING ──[cancel]──► CLEANING ──[完成]──► IDLE
 
 ---
 
-### 6.7 get_asset - 查询单个资产详情 ⭐ v3.2
+### 6.7 get_assets - 查询单个资产详情 ⭐ v3.2
 
 **Tag ID格式**：`0x0001-0xFFFF`
 
 **命令格式**：
 ```json
 {
-  "cmd": "get_asset",
+  "cmd": "get_assets",
   "tag_id": "0x0001"
 }
 ```
@@ -598,7 +598,7 @@ FINALIZING ──[cancel]──► CLEANING ──[完成]──► IDLE
 **字段说明**：
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| cmd | string | ✅ | 固定值"get_asset" |
+| cmd | string | ✅ | 固定值"get_assets" |
 | tag_id | string | ✅* | Tag ID（格式：0x0001-0xFFFF）⭐替代mac |
 | mac | string | ❌* | 旧MAC地址格式（向后兼容，与tag_id二选一） |
 
@@ -817,6 +817,40 @@ FINALIZING ──[cancel]──► CLEANING ──[完成]──► IDLE
   "state": "idle"
 }
 ```
+
+### 6.11 scan_list - 查询 SLE 扫描标签列表
+
+**说明**：查询 WS63 SLE 扫描表中已发现的 BS21E 标签列表，返回 tag_id 和信号强度。
+
+**请求格式**：
+```json
+{"cmd":"scan_list"}
+```
+
+**WS63 直接响应**（不经过 ESP32）：
+```json
+{"type":"scan_list_result","tags":[{"tag_id":"0001","rssi":-45},{"tag_id":"0002","rssi":-52}]}
+```
+
+### 6.12 update_qty - 更新本地标签数量
+
+**说明**：更新 WS63 内部 `biz_tag_map` 中标签的数量字段，不经过 ESP32。
+
+**请求格式**：
+```json
+{"cmd":"update_qty","tag_id":"0x0001","quantity":50}
+```
+
+### 6.13 inbound - 标签入库
+
+**说明**：通过 SLE 网络向 BS21E 标签写入资产信息，用于电子标签入库绑定。与 `register` 不同，`inbound` 直接操作 SLE 标签，不经过 ESP32 摄像头。
+
+**请求格式**：
+```json
+{"cmd":"inbound","tag_id":"0001","item_name":"扳手","storage_area":"A","quantity":50}
+```
+
+> **注意**：`inbound`（SLE 标签入库）与 `register`（ESP32 摄像头注册）是两条独立路径。屏幕端"入库"流程先调 `inbound` 绑定标签，再调 `register` 拍摄三视图。
 
 ---
 
@@ -1142,7 +1176,9 @@ IDLE ──[register/inventory]──► INITIALIZING
 
 ---
 
-## 11. L610系统架构
+## 11. L610 系统架构（物联网大赛赛道）
+
+> **⭐ 2026-06-26 现状（IoT 赛道）**：WS63 为主控，通过 UART1 `mqtt_connect` / `mqtt_publish` 驱动 ESP32 透传 L610 上 **EMQX Cloud MQTTS :8883**。上云主题 **`v1/gateway/telemetry`**（方案 A：标签 + `gateway` 子设备同包）。ESP32 **不**自行 publish 心跳、**不** subscribe RPC。
 
 ### 11.1 三方通信架构
 
@@ -1175,8 +1211,8 @@ IDLE ──[register/inventory]──► INITIALIZING
 
 | 信号 | ESP32-S3 引脚 | L610 引脚 | 方向 | 说明 |
 |------|-------------|----------|------|------|
-| UART TX | **GPIO4** | RX | ESP32 → L610 | AT指令发送 |
-| UART RX | **GPIO5** | TX | L610 → ESP32 | URC事件接收 |
+| UART TX | **GPIO19** | RX | ESP32 → L610 | AT指令发送 |
+| UART RX | **GPIO20** | TX | L610 → ESP32 | URC事件接收 |
 | GND | GND | GND | — | 共地（必须） |
 | VCC | 3.3V/5V | VCC | — | 供电（根据模块规格） |
 
@@ -1207,8 +1243,8 @@ IDLE ──[register/inventory]──► INITIALIZING
 ```json
 {
   "cmd": "mqtt_connect",
-  "host": "mqtt.thingskit.com",
-  "port": 1883,
+  "host": "h13f6185.ala.cn-hangzhou.emqxsl.cn",
+  "port": 8883,
   "clean_session": 1,
   "keepalive": 60
 }
@@ -1219,7 +1255,7 @@ IDLE ──[register/inventory]──► INITIALIZING
 |------|------|------|--------|------|
 | cmd | string | ✅ | - | 固定值"mqtt_connect" |
 | host | string | ✅ | - | MQTT服务器地址 |
-| port | number | ❌ | 1883 | 端口号 |
+| port | number | ❌ | **8883** | MQTTS 端口；L610 `AT+MQTTOPEN` UseTls=2 |
 | clean_session | number | ❌ | 1 | 清除会话标志（0/1） |
 | keepalive | number | ❌ | 60 | 心跳间隔（秒），范围1-300 |
 
@@ -1242,8 +1278,8 @@ IDLE ──[register/inventory]──► INITIALIZING
 {
   "type": "mqtt_connected",
   "state": "connected",
-  "host": "mqtt.thingskit.com",
-  "port": 1883
+  "host": "h13f6185.ala.cn-hangzhou.emqxsl.cn",
+  "port": 8883
 }
 
 // 失败
@@ -1258,12 +1294,12 @@ IDLE ──[register/inventory]──► INITIALIZING
 
 ### 13.2 mqtt_publish - 发布MQTT消息
 
-**命令格式**：
+**命令格式（物联网大赛 — 网关遥测）**：
 ```json
 {
   "cmd": "mqtt_publish",
-  "topic": "device/status",
-  "payload": "{\"mac\":\"AA:BB:CC:DD:EE:FF\",\"status\":\"online\"}",
+  "topic": "v1/gateway/telemetry",
+  "payload": "{\"tag_001\":[{\"tag_id\":1,\"qty\":50}],\"gateway\":[{\"state\":\"idle\"}]}",
   "qos": 1,
   "retain": 0
 }
@@ -1272,23 +1308,24 @@ IDLE ──[register/inventory]──► INITIALIZING
 **字段说明**：
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
-| cmd | string | ✅ | - | 固定值"mqtt_publish" |
-| topic | string | ✅ | - | MQTT主题（建议≤128字节） |
-| payload | string | ✅ | - | 消息内容 |
+| cmd | string | ✅ | - | 固定值 `"mqtt_publish"` |
+| topic | string | ✅ | - | 物联网赛道固定 **`v1/gateway/telemetry`** |
+| payload | string | ✅ | - | ThingsKit 网关 JSON（`tag_XXX` + `gateway`） |
 | qos | number | ❌ | 1 | QoS等级（0/1/2） |
 | retain | number | ❌ | 0 | 保留标志（0/1） |
 
-**⚠️ 限制条件**：
-- **Payload最大长度：1024字节**（超过返回ERR_INVALID_SIZE）
-- 必须在MQTT连接状态下执行
-- AT指令总长度不能超过UART缓冲区（2048字节）
+**⚠️ 限制与实现（2026-06-26）**：
+- **Payload 最大 1024 字节**（L610 `AT+MQTTPUB` 上限）
+- JSON 含双引号时 ESP32 自动走 **Datasize 二进制模式**（`AT+MQTTPUB=...,<len>` → `>` → 原始字节）
+- 短纯 ASCII 无引号 payload 仍走字符串模式
+- 连接前 ESP32 会等待 `AT+CGATT?` 附着（最长约 30s）
+- 未传 `port` 时 `mqtt_connect` 默认 **8883**（`L610_MQTT_BROKER_PORT`）
 
 **执行流程**：
-1. 检查payload长度（≤1024字节）
-2. 估算AT指令总长度：`AT+MQTTPUB=1,"{topic}",{qos},{retain},"{payload}"`
-3. 构造AT+MQTTPUB指令并发送至L610
-4. 等待+MQTTPUB URC事件（超时10秒）
-5. 向WS63上报发布结果
+1. 检查 payload 长度（≤1024）
+2. 选择字符串或 Datasize 模式构造 `AT+MQTTPUB`
+3. 等待 `+MQTTPUB` URC（超时 8s）
+4. 向 WS63 上报 `mqtt_publish_done` / `l610_error`
 
 **响应示例**：
 ```
@@ -1321,8 +1358,8 @@ IDLE ──[register/inventory]──► INITIALIZING
 {
   "type": "mqtt_connected",
   "state": "disconnected",
-  "host": "mqtt.thingskit.com",
-  "port": 1883
+  "host": "h13f6185.ala.cn-hangzhou.emqxsl.cn",
+  "port": 8883
 }
 ```
 
@@ -1379,8 +1416,8 @@ AT+MQTTLOG=1    # 开启MQTT详细日志
   "mqtt_state": "CONNECTED",
   "signal_quality": 25,
   "network_attached": true,
-  "current_host": "mqtt.thingskit.com",
-  "current_port": 1883
+  "current_host": "h13f6185.ala.cn-hangzhou.emqxsl.cn",
+  "current_port": 8883
 }
 ```
 
@@ -1395,8 +1432,8 @@ AT+MQTTLOG=1    # 开启MQTT详细日志
 {
   "type": "mqtt_connected",
   "state": "connected",
-  "host": "mqtt.thingskit.com",
-  "port": 1883
+  "host": "h13f6185.ala.cn-hangzhou.emqxsl.cn",
+  "port": 8883
 }
 ```
 
@@ -1572,8 +1609,8 @@ AT+MQTTLOG=1    # 开启MQTT详细日志
   "mqtt_state": "CONNECTED",
   "signal_quality": 25,
   "network_attached": true,
-  "current_host": "mqtt.thingskit.com",
-  "current_port": 1883
+  "current_host": "h13f6185.ala.cn-hangzhou.emqxsl.cn",
+  "current_port": 8883
 }
 ```
 
@@ -1615,8 +1652,8 @@ AT+MQTTLOG=1    # 开启MQTT详细日志
   "mqtt_state": "CONNECTED",
   "signal_quality": 25,
   "network_attached": true,
-  "current_host": "mqtt.thingskit.com",
-  "current_port": 1883
+  "current_host": "h13f6185.ala.cn-hangzhou.emqxsl.cn",
+  "current_port": 8883
 }
 
 // 模块失联
@@ -1785,9 +1822,9 @@ void protocol_handler_init(void) {
 #define L610_UART_BAUD       115200
 #define L610_UART_BUF_SIZE   2048
 
-// MQTT配置
-#define L610_MQTT_USERNAME   "<MQTT_USERNAME>"
-#define L610_MQTT_PASSWORD   ""
+// MQTT配置（凭据见 Kconfig / sdkconfig.defaults.local，勿写入文档或仓库）
+#define L610_MQTT_USERNAME   CONFIG_L610_MQTT_USERNAME
+#define L610_MQTT_PASSWORD   CONFIG_L610_MQTT_PASSWORD
 #define L610_MQTT_KEEPALIVE  60
 #define L610_MQTT_QOS        1
 

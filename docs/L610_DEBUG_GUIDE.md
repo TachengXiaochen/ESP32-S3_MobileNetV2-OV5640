@@ -1,12 +1,64 @@
-# L610 4G模块调试指南 v3.6
+# L610 4G 模块调试指南
 
-> **文档版本**: v3.6  
-> **最后更新**: 2026-06-18  
-> **适用项目**: CAM_AI (ESP32-S3 + L610 4G模块)  
+> **文档版本**: v3.7  
+> **最后更新**: 2026-06-26  
+> **适用**: 物联网大赛 — ESP32-S3 + L610 → **EMQX Cloud MQTTS :8883**  
+> **凭据**: `idf.py menuconfig` → CAM AI → L610 MQTT，或 `sdkconfig.defaults.local`
 
 ---
 
-## 目录
+## 硬件（ADP-L610-Arduino J3）
+
+```
+ESP32-S3          L610 Module
+GPIO19 (TX)  →   RX
+GPIO20 (RX)  ←   TX
+GND          ↔   GND
+```
+
+UART2 · 115200 8N1 · `main/modules/4g/l610_config.h`
+
+---
+
+## mqtt_connect（WS63 → ESP32）
+
+```json
+{"cmd":"mqtt_connect","host":"h13f6185.ala.cn-hangzhou.emqxsl.cn","port":8883,"clean_session":1,"keepalive":60}
+```
+
+- 未传 `port` 时 ESP32 默认 **8883**（Kconfig）
+- L610 `AT+MQTTOPEN` 最后一参 **UseTls=2**
+- 连接前等待 `AT+CGATT?` 网络附着
+
+---
+
+## mqtt_publish（网关遥测）
+
+```json
+{"cmd":"mqtt_publish","topic":"v1/gateway/telemetry","payload":"{\"gateway\":[{\"state\":\"idle\"}]}","qos":1,"retain":0}
+```
+
+- 主题固定 **`v1/gateway/telemetry`**（方案 A）
+- Payload ≤ **1024** 字节
+- JSON 自动走 L610 **Datasize 二进制模式**（避免引号破坏 AT 指令）
+
+---
+
+## 本地调试
+
+```powershell
+.\tools\idf.ps1 menuconfig   # CAM AI Configuration
+.\tools\idf.ps1 build
+.\tools\idf.ps1 flash -Port COM7
+.\tools\idf.ps1 monitor-capture -Port COM7 -Seconds 30
+```
+
+Web/MJPEG 默认关闭：`CONFIG_CAM_AI_ENABLE_WEB_SERVER=n`
+
+---
+
+> 下文为历史调试章节（部分示例仍为旧端口，以本节 EMQX 8883 为准）。
+
 
 1. [环境准备](#1-环境准备)
 2. [基础功能验证](#2-基础功能验证)
@@ -183,7 +235,7 @@ I (xxx) l610_driver: AT command succeeded after 1 retries: AT+CSQ
 **步骤1**: 查看ClientID生成日志
 ```
 I (xxx) protocol_handler: L610 ClientID generated: WS63-AA:BB:CC:DD:EE:FF
-I (xxx) l610_mqtt: MQTT user set: <MQTT_USERNAME>, ClientID=WS63-AA:BB:CC:DD:EE:FF
+I (xxx) l610_mqtt: MQTT user set: <your_mqtt_username>, ClientID=WS63-AA:BB:CC:DD:EE:FF
 ```
 
 **步骤2**: 等待连接成功响应
@@ -545,10 +597,10 @@ print("\nReconnect stability test completed!")
    CSQ应 > 10
 
 3. **验证MQTT参数**
-   ```c
-   // l610_config.h
-   #define L610_MQTT_USERNAME "your_username"
-   #define L610_MQTT_PASSWORD "your_password"
+   ```text
+   # sdkconfig.defaults.local（gitignored，勿提交）
+   CONFIG_L610_MQTT_USERNAME="your_mqtt_username"
+   CONFIG_L610_MQTT_PASSWORD="your_mqtt_password"
    ```
 
 4. **开启L610详细日志**

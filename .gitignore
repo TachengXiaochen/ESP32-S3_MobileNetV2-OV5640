@@ -1,6 +1,47 @@
+# ── Build / IDF artifacts ─────────────────────────────────────
 build/
+logs/
 sdkconfig
 sdkconfig.old
+sdkconfig.defaults.local
 *.bin
 *.elf
 *.map
+
+# ── Secrets — never commit real credentials ───────────────────
+.env
+.env.*
+!.env.example
+!sdkconfig.defaults.local.example
+
+# TLS / key material
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+credentials.json
+secrets.json
+**/secrets/
+
+# ── Internal docs — may contain historical creds / local notes ─
+docs/archive/
+
+# ── Local satellite projects / dashboard (WIP) ────────────────
+ws63/
+bs21/
+dashboard/
+
+# Backend legacy client with embedded ThingsKit creds
+dashboard/backend/thingskit_api.js
+
+# ── Node / tooling ────────────────────────────────────────────
+node_modules/
+package-lock.json
+
+# ── IDE / agent (optional local) ──────────────────────────────
+.cursor/
+
+# ── OS junk ───────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
